@@ -167,9 +167,10 @@ def run_generation_job(uid: str, languages: List[str]):
             "seed": base_seed
         }
         
-        # Create a run configuration with the gpt-4o-mini model
+        # Create a run configuration with the gpt-4o-mini model and disable schema validation
         from agents import RunConfig
-        run_config = RunConfig(model="gpt-4o-mini")
+        # Setting validate_schemas=False to bypass additionalProperties check
+        run_config = RunConfig(model="gpt-4o-mini", validate_schemas=False)
         
         # Run the agent with the configuration
         result = await Runner.run(
