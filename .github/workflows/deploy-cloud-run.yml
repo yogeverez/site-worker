@@ -20,11 +20,6 @@ env:
   PROJECT_ID_PROD: landing-aabbb
   SERVICE_NAME: site-worker
   REGION: us-central1
-  # These will be populated from GitHub secrets
-  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-  SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
-  UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
-  BING_SEARCH_URL: ${{ secrets.BING_SEARCH_URL }}
 
 jobs:
   deploy:
@@ -66,46 +61,25 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
       
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
       - name: Build and push Docker image
-        id: build_step
-        run: |
-          echo "Starting build with gcloud builds submit..."
-          gcloud builds submit \
-            --tag gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
-            --suppress-logs \
-            --async
-
-          # Verify the image was created
-          echo "Verifying image was created..."
-          gcloud container images list-tags "gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}" --limit=5
-
-          echo "build_status=success" >> $GITHUB_OUTPUT
-
-      - name: Wait for Image in GCR
-        if: steps.build_step.outputs.build_status == 'success'
-        shell: bash
-        run: |
-          IMAGE_URI="gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}"
-          echo "Waiting for image $IMAGE_URI to be available..."
-          for i in {1..12}; do # Try for 12 times (12 * 10s = 2 minutes)
-            if gcloud container images describe "$IMAGE_URI" --format='value(name)' > /dev/null 2>&1; then
-              echo "Image $IMAGE_URI found."
-              exit 0
-            fi
-            echo "Attempt $i: Image $IMAGE_URI not found yet. Waiting 10 seconds..."
-            sleep 10
-          done
-          echo "Error: Image $IMAGE_URI not found after 2 minutes."
-          exit 1
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       
       - name: Deploy to Cloud Run
-        if: steps.build_step.outputs.build_status == 'success'
         run: |
           # Escape commas in environment variables to avoid gcloud substitution issues
-          OPENAI_API_KEY=$(echo "${{ env.OPENAI_API_KEY }}" | sed 's/,/\\,/g')
-          SERPAPI_KEY=$(echo "${{ env.SERPAPI_KEY }}" | sed 's/,/\\,/g')
-          UNSPLASH_ACCESS_KEY=$(echo "${{ env.UNSPLASH_ACCESS_KEY }}" | sed 's/,/\\,/g')
-          BING_SEARCH_URL=$(echo "${{ env.BING_SEARCH_URL }}" | sed 's/,/\\,/g')
+          OPENAI_API_KEY=$(echo "${{ secrets.OPENAI_API_KEY }}" | sed 's/,/\\,/g')
+          SERPAPI_KEY=$(echo "${{ secrets.SERPAPI_KEY }}" | sed 's/,/\\,/g')
+          UNSPLASH_ACCESS_KEY=$(echo "${{ secrets.UNSPLASH_ACCESS_KEY }}" | sed 's/,/\\,/g')
+          BING_SEARCH_URL=$(echo "${{ secrets.BING_SEARCH_URL }}" | sed 's/,/\\,/g')
           
           echo "Deploying to Cloud Run..."
           gcloud run deploy ${{ env.SERVICE_NAME }} \
