@@ -8,9 +8,21 @@ from pydantic import BaseModel, Field
 
 # Base model with configuration to disable additionalProperties
 class StrictBaseModel(BaseModel):
+    # The OpenAI Agents SDK requires a specific configuration for Pydantic models
+    # We need to prevent additionalProperties from being included in the schema
     model_config = {
-        "extra": "forbid",  # Forbid extra fields
+        "extra": "forbid",  # Forbid extra fields during validation
+        "validate_assignment": True,
     }
+    
+    @classmethod
+    def model_json_schema(cls, **kwargs):
+        """Override the default schema generation to remove additionalProperties."""
+        schema = super().model_json_schema(**kwargs)
+        # Remove additionalProperties from the schema
+        if "additionalProperties" in schema:
+            del schema["additionalProperties"]
+        return schema
 
 class HeroComponent(StrictBaseModel):
     title: str
