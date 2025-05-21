@@ -8,9 +8,12 @@ from pydantic import BaseModel, Field
 
 # Base model with configuration to disable additionalProperties
 class StrictBaseModel(BaseModel):
-    model_config = {
-        "extra": "forbid",  # Forbid extra fields
-    }
+    class Config:
+        extra = "forbid"  # Forbid extra fields
+        populate_by_name = True
+        json_schema_extra = {
+            "additionalProperties": False
+        }
 
 class HeroComponent(StrictBaseModel):
     title: str
