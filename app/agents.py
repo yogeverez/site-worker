@@ -4,7 +4,7 @@ Builds all OpenAI Agents, prompts & the job runner.
 from __future__ import annotations
 from typing import List, Dict, Any
 from openai import OpenAI
-from openai_agents import Agent, handoff, guard
+from agents import Agent, handoff, guard
 from google.cloud import firestore
 from tools import (
     fetch_url, strip_html, web_search, image_search, random_image, save_component
