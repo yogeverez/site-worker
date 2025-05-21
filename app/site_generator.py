@@ -22,8 +22,8 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     logger.warning("OPENAI_API_KEY environment variable is not set")
     
-# Create OpenAI client with default model set to gpt-4o-mini
-client = OpenAI(api_key=api_key, default_model="gpt-4o-mini")
+# Create OpenAI client
+client = OpenAI(api_key=api_key)
 
 # ------------------------------------------------------------------ #
 # 1.  Sub-agents
