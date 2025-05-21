@@ -95,24 +95,34 @@ jobs:
           echo "build_status=success" >> $GITHUB_OUTPUT
 
       - name: Wait for Image in GCR
+        id: wait_for_image
         if: steps.build_step.outputs.build_status == 'success'
         shell: bash
         run: |
           IMAGE_URI="gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}"
           echo "Waiting for image $IMAGE_URI to be available..."
+          IMAGE_FOUND=false
+          
           for i in {1..12}; do # Try for 12 times (12 * 10s = 2 minutes)
             if gcloud container images describe "$IMAGE_URI" --format='value(name)' > /dev/null 2>&1; then
               echo "Image $IMAGE_URI found."
-              exit 0
+              IMAGE_FOUND=true
+              echo "image_found=true" >> $GITHUB_OUTPUT
+              break
             fi
             echo "Attempt $i: Image $IMAGE_URI not found yet. Waiting 10 seconds..."
             sleep 10
           done
-          echo "Error: Image $IMAGE_URI not found after 2 minutes."
-          exit 1
+          
+          if [ "$IMAGE_FOUND" = false ]; then
+            echo "Error: Image $IMAGE_URI not found after 2 minutes."
+            echo "image_found=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
       
       - name: Deploy to Cloud Run
-        if: steps.build_step.outputs.build_status == 'success'
+        id: deploy_step
+        if: steps.build_step.outputs.build_status == 'success' && steps.wait_for_image.outputs.image_found == 'true'
         run: |
           # Escape commas in environment variables to avoid gcloud substitution issues
           OPENAI_API_KEY=$(echo "${{ env.OPENAI_API_KEY }}" | sed 's/,/\\,/g')
@@ -121,22 +131,53 @@ jobs:
           BING_SEARCH_URL=$(echo "${{ env.BING_SEARCH_URL }}" | sed 's/,/\\,/g')
           
           echo "Deploying to Cloud Run..."
+          
+          # Get the default compute service account
+          SERVICE_ACCOUNT="$(gcloud iam service-accounts list --filter="email ~ ^${{ env.PROJECT_ID }}@" --format='value(email)' | grep -E "compute|cloudservices" | head -n 1)"
+          
+          if [ -z "$SERVICE_ACCOUNT" ]; then
+            # Fallback to default service account
+            SERVICE_ACCOUNT="${{ env.PROJECT_ID }}@appspot.gserviceaccount.com"
+            echo "Using default service account: $SERVICE_ACCOUNT"
+          else
+            echo "Using service account: $SERVICE_ACCOUNT"
+          fi
+          
+          # Deploy with more detailed output
           gcloud run deploy ${{ env.SERVICE_NAME }} \
             --image gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
             --platform managed \
             --region ${{ env.REGION }} \
             --memory 1Gi \
             --set-env-vars="OPENAI_API_KEY=${OPENAI_API_KEY},SERPAPI_KEY=${SERPAPI_KEY},UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY},BING_SEARCH_URL=${BING_SEARCH_URL}" \
-            --service-account=${{ env.PROJECT_ID }}@appspot.gserviceaccount.com \
-            --allow-unauthenticated
+            --service-account="$SERVICE_ACCOUNT" \
+            --allow-unauthenticated \
+            --verbosity=debug
 
-          echo "Deployment completed."
+          DEPLOY_STATUS=$?
+          if [ $DEPLOY_STATUS -eq 0 ]; then
+            echo "Deployment completed successfully."
+            echo "deploy_status=success" >> $GITHUB_OUTPUT
+          else
+            echo "Deployment failed with status code: $DEPLOY_STATUS"
+            echo "deploy_status=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
 
       - name: Show Output
-        if: steps.build_step.outputs.build_status == 'success'
+        if: steps.deploy_step.outputs.deploy_status == 'success'
         run: |
           echo "Deployed to Cloud Run service ${{ env.SERVICE_NAME }} in region ${{ env.REGION }}"
-          gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format 'value(status.url)'
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format 'value(status.url)')
+          echo "Service URL: $SERVICE_URL"
+          
+          # Show service configuration
+          echo "\nService Configuration:"
+          gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format 'yaml(spec)'
+          
+          # Show recent revisions
+          echo "\nRecent Revisions:"
+          gcloud run revisions list --service ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --limit 3
 
       - name: Debug on Failure
         if: failure()
