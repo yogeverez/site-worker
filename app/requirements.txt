@@ -1,5 +1,5 @@
 openai>=1.23          # official OpenAI SDK
-openai-agents==0.0.15  # Agents SDK
+openai_agents==0.0.15  # Agents SDK
 google-cloud-firestore>=2.15
 google-cloud-pubsub>=2.20
 Flask>=3.0
