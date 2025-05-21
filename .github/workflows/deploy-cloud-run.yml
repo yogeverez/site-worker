@@ -24,6 +24,7 @@ env:
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
   SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
   UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+  BING_SEARCH_URL: ${{ secrets.BING_SEARCH_URL }}
 
 jobs:
   deploy:
@@ -104,6 +105,7 @@ jobs:
           OPENAI_API_KEY=$(echo "${{ env.OPENAI_API_KEY }}" | sed 's/,/\\,/g')
           SERPAPI_KEY=$(echo "${{ env.SERPAPI_KEY }}" | sed 's/,/\\,/g')
           UNSPLASH_ACCESS_KEY=$(echo "${{ env.UNSPLASH_ACCESS_KEY }}" | sed 's/,/\\,/g')
+          BING_SEARCH_URL=$(echo "${{ env.BING_SEARCH_URL }}" | sed 's/,/\\,/g')
           
           echo "Deploying to Cloud Run..."
           gcloud run deploy ${{ env.SERVICE_NAME }} \
@@ -111,7 +113,7 @@ jobs:
             --platform managed \
             --region ${{ env.REGION }} \
             --memory 1Gi \
-            --set-env-vars="OPENAI_API_KEY=${OPENAI_API_KEY},SERPAPI_KEY=${SERPAPI_KEY},UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY}" \
+            --set-env-vars="OPENAI_API_KEY=${OPENAI_API_KEY},SERPAPI_KEY=${SERPAPI_KEY},UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY},BING_SEARCH_URL=${BING_SEARCH_URL}" \
             --service-account=${{ env.PROJECT_ID }}@appspot.gserviceaccount.com \
             --allow-unauthenticated
 
