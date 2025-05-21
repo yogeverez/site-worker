@@ -3,25 +3,11 @@ Shared utility functions (web fetch, search, image search, Firestore write).
 """
 from __future__ import annotations
 import os, random, re, requests
-import logging
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
+from google.cloud import firestore
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Initialize Firestore client with error handling for local development
-try:
-    from google.cloud import firestore
-    db = firestore.Client()
-    FIRESTORE_AVAILABLE = True
-    logger.info("Firestore client initialized successfully")
-except Exception as e:
-    logger.warning(f"Firestore client initialization failed: {e}")
-    logger.warning("Running in local development mode without Firestore")
-    db = None
-    FIRESTORE_AVAILABLE = False
+db = firestore.Client()
 
 # ------------------------------------------------------------------ #
 # 1.  Basic web fetching / stripping
@@ -83,12 +69,6 @@ def random_image(query: str) -> str | None:
 # ------------------------------------------------------------------ #
 def save_component(uid: str, lang: str, component: str, data: Dict[str, Any]):
     """Write `{component}.json` into users/{uid}/siteContent/{lang}/components/."""
-    if not FIRESTORE_AVAILABLE:
-        logger.info(f"[LOCAL DEV] Would save component '{component}' for user {uid} in language {lang}")
-        logger.info(f"[LOCAL DEV] Component data: {data}")
-        return
-        
-    # Only execute if Firestore is available
     db.collection("users").document(uid) \
       .collection("siteContent").document(lang) \
       .collection("components").document(component).set(data)
