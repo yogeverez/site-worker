@@ -17,22 +17,20 @@ client = OpenAI()
 # 1.  Sub-agents
 # ------------------------------------------------------------------ #
 researcher = Agent(
-    system=(
+    name="Researcher",
+    instructions=(
         "You are a diligent researcher.  "
         "Use the tools below to collect concise facts:\n"
         "• search(query,k)\n• fetch(url) -> html\n• strip_html(html)\n\n"
         "Return PLAINTEXT bullet points relevant to the person/company only."
     ),
-    tools={
-        "search": web_search,
-        "fetch": fetch_url,
-        "strip_html": strip_html,
-    },
+    tools=[web_search, fetch_url, strip_html]
 )
 
 def make_validator(model):
     return Agent(
-        system="Validate or fix JSON so it exactly matches the given schema.",
+        name=f"{model.__name__} Validator",
+        instructions="Validate or fix JSON so it exactly matches the given schema.",
         output_type=model
     )
 
@@ -66,16 +64,37 @@ def translate_json(json_obj: Dict[str, Any], target_lang: str) -> Dict[str, Any]
 # ------------------------------------------------------------------ #
 # 2.  Orchestrator agent
 # ------------------------------------------------------------------ #
-orchestrator_tools = {
-    "research": handoff(researcher),
-    "translate": translate_json,
-    "image_search": image_search,
-    "random_image": random_image,
-    "save": save_component,
-}
-# add validators to tools dict
+from agents import function_tool
+
+# Wrap the function tools
+@function_tool
+def translate_tool(json_obj: Dict[str, Any], target_lang: str) -> Dict[str, Any]:
+    return translate_json(json_obj, target_lang)
+
+@function_tool
+def image_search_tool(query: str, k: int = 5) -> List[str]:
+    return image_search(query, k)
+
+@function_tool
+def random_image_tool(query: str) -> str:
+    return random_image(query)
+
+@function_tool
+def save_component_tool(uid: str, lang: str, component: str, data: Dict[str, Any]):
+    return save_component(uid, lang, component, data)
+
+# Create the tools list
+orchestrator_tools = [
+    handoff(researcher),
+    translate_tool,
+    image_search_tool,
+    random_image_tool,
+    save_component_tool
+]
+
+# Add validators to tools list
 for comp, agent in validators.items():
-    orchestrator_tools[f"validate_{comp}"] = handoff(agent)
+    orchestrator_tools.append(handoff(agent))
 
 orchestrator_prompt = """
 You are the SiteGenerator Orchestrator.
@@ -103,14 +122,18 @@ End with DONE.
 """
 
 orchestrator = Agent(
-    system=orchestrator_prompt,
-    tools=orchestrator_tools,
+    name="SiteGenerator Orchestrator",
+    instructions=orchestrator_prompt,
+    tools=orchestrator_tools
 )
 
 # ------------------------------------------------------------------ #
 # 3.  Job runner
 # ------------------------------------------------------------------ #
 def run_generation_job(uid: str, languages: List[str]):
+    import asyncio
+    from agents import Runner
+    
     fs = firestore.Client()
     wizard_ref = (
         fs.collection("users").document(uid)
@@ -124,16 +147,23 @@ def run_generation_job(uid: str, languages: List[str]):
     # Seed for the agent
     base_seed = {k: v for k, v in wizard.items() if k not in ("createdAt", "updatedAt")}
 
-    for lang in languages:
-        prompt = orchestrator_prompt.format(uid=uid, lang=lang)
-        orchestrator.run(
-            prompt,
-            extra_inputs={
-                "uid": uid,
-                "lang": lang,
-                "seed": base_seed,
-            },
+    async def run_for_language(lang):
+        prompt = f"Generate website content for user {uid} in language {lang}"
+        context = {
+            "uid": uid,
+            "lang": lang,
+            "seed": base_seed
+        }
+        result = await Runner.run(
+            orchestrator,
+            input=prompt,
+            context=context,
             model="gpt-4o-mini",
-            max_calls=60,
+            max_turns=60
         )
         print(f"[{uid}] Generation finished for lang={lang}")
+        return result
+
+    # Run the async function in a synchronous context
+    for lang in languages:
+        asyncio.run(run_for_language(lang))
