@@ -1,0 +1,100 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+
+env:
+  PROJECT_ID_DEV: landing-dev-cf5b5
+  PROJECT_ID_PROD: landing-aabbb
+  SERVICE_NAME: site-worker
+  REGION: us-central1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set environment variables
+        id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ github.event.inputs.environment }}"
+          else
+            # Default to dev for regular pushes
+            ENV="dev"
+          fi
+          
+          if [[ "$ENV" == "prod" ]]; then
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+            echo "PROJECT_ID=${{ env.PROJECT_ID_PROD }}" >> $GITHUB_ENV
+            echo "SA_KEY=GCP_SA_KEY_PROD" >> $GITHUB_ENV
+          else
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+            echo "PROJECT_ID=${{ env.PROJECT_ID_DEV }}" >> $GITHUB_ENV
+            echo "SA_KEY=GCP_SA_KEY_DEV" >> $GITHUB_ENV
+          fi
+          
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+      
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets[env.SA_KEY] }}
+      
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+      
+      - name: Build and push Docker image
+        run: |
+          gcloud builds submit --tag gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
+      
+      - name: Deploy to Cloud Run
+        run: |
+          # Escape commas in environment variables to avoid gcloud substitution issues
+          OPENAI_API_KEY=$(echo "${{ secrets.OPENAI_API_KEY }}" | sed 's/,/\\,/g')
+          SERPAPI_KEY=$(echo "${{ secrets.SERPAPI_KEY }}" | sed 's/,/\\,/g')
+          UNSPLASH_ACCESS_KEY=$(echo "${{ secrets.UNSPLASH_ACCESS_KEY }}" | sed 's/,/\\,/g')
+          
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
+            --platform managed \
+            --region ${{ env.REGION }} \
+            --memory 1Gi \
+            --set-env-vars="OPENAI_API_KEY=${OPENAI_API_KEY},SERPAPI_KEY=${SERPAPI_KEY},UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY}" \
+            --service-account=${{ env.PROJECT_ID }}@appspot.gserviceaccount.com \
+            --allow-unauthenticated
+      
+      - name: Set up Pub/Sub (first deployment only)
+        if: ${{ steps.set-env.outputs.environment == 'dev' }}
+        run: |
+          # Check if topic exists, create if not
+          if ! gcloud pubsub topics describe site-generation-jobs 2>/dev/null; then
+            gcloud pubsub topics create site-generation-jobs
+          fi
+          
+          # Get the service URL
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format='value(status.url)')
+          
+          # Check if subscription exists, create if not
+          if ! gcloud pubsub subscriptions describe site-worker-sub 2>/dev/null; then
+            gcloud pubsub subscriptions create site-worker-sub \
+              --topic site-generation-jobs \
+              --push-endpoint=${SERVICE_URL}/ \
+              --push-auth-service-account=${{ env.PROJECT_ID }}@appspot.gserviceaccount.com
+          fi
