@@ -3,7 +3,7 @@ HTTP entry-point for Cloud Run (Pub/Sub push).
 """
 from flask import Flask, request, abort
 import base64, json, os
-from agents import run_generation_job
+from site_generator import run_generation_job
 
 app = Flask(__name__)
 
