@@ -79,15 +79,16 @@ def translate_json(json_obj: Dict[str, Any], target_lang: str) -> Dict[str, Any]
 from agents import function_tool
 
 # Wrap the function tools
-@function_tool
+# Disable schema validation for function tools
+@function_tool(validate_schema=False)
 def translate_tool(json_obj: Dict[str, Any], target_lang: str) -> Dict[str, Any]:
     return translate_json(json_obj, target_lang)
 
-@function_tool
+@function_tool(validate_schema=False)
 def image_search_tool(query: str, k: int = 5) -> List[str]:
     return image_search(query, k)
 
-@function_tool
+@function_tool(validate_schema=False)
 def random_image_tool(query: str) -> str:
     return random_image(query)
 
