@@ -4,7 +4,7 @@ Builds all OpenAI Agents, prompts & the job runner.
 from __future__ import annotations
 from typing import List, Dict, Any
 from openai import OpenAI
-from agents import Agent, handoff, guard
+from agents import Agent, handoff
 from google.cloud import firestore
 from tools import (
     fetch_url, strip_html, web_search, image_search, random_image, save_component
@@ -33,7 +33,7 @@ researcher = Agent(
 def make_validator(model):
     return Agent(
         system="Validate or fix JSON so it exactly matches the given schema.",
-        guard=guard.pydantic(model),
+        output_type=model
     )
 
 validators: Dict[str, Agent] = {
