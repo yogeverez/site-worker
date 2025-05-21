@@ -61,16 +61,46 @@ jobs:
         uses: google-github-actions/setup-gcloud@v1
       
       - name: Build and push Docker image
+        id: build_step
         run: |
-          gcloud builds submit --tag gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
+          echo "Starting build with gcloud builds submit..."
+          gcloud builds submit \
+            --tag gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
+            --suppress-logs \
+            --async
+
+          # Verify the image was created
+          echo "Verifying image was created..."
+          gcloud container images list-tags "gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}" --limit=5
+
+          echo "build_status=success" >> $GITHUB_OUTPUT
+
+      - name: Wait for Image in GCR
+        if: steps.build_step.outputs.build_status == 'success'
+        shell: bash
+        run: |
+          IMAGE_URI="gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+          echo "Waiting for image $IMAGE_URI to be available..."
+          for i in {1..12}; do # Try for 12 times (12 * 10s = 2 minutes)
+            if gcloud container images describe "$IMAGE_URI" --format='value(name)' > /dev/null 2>&1; then
+              echo "Image $IMAGE_URI found."
+              exit 0
+            fi
+            echo "Attempt $i: Image $IMAGE_URI not found yet. Waiting 10 seconds..."
+            sleep 10
+          done
+          echo "Error: Image $IMAGE_URI not found after 2 minutes."
+          exit 1
       
       - name: Deploy to Cloud Run
+        if: steps.build_step.outputs.build_status == 'success'
         run: |
           # Escape commas in environment variables to avoid gcloud substitution issues
           OPENAI_API_KEY=$(echo "${{ secrets.OPENAI_API_KEY }}" | sed 's/,/\\,/g')
           SERPAPI_KEY=$(echo "${{ secrets.SERPAPI_KEY }}" | sed 's/,/\\,/g')
           UNSPLASH_ACCESS_KEY=$(echo "${{ secrets.UNSPLASH_ACCESS_KEY }}" | sed 's/,/\\,/g')
           
+          echo "Deploying to Cloud Run..."
           gcloud run deploy ${{ env.SERVICE_NAME }} \
             --image gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
             --platform managed \
@@ -79,6 +109,24 @@ jobs:
             --set-env-vars="OPENAI_API_KEY=${OPENAI_API_KEY},SERPAPI_KEY=${SERPAPI_KEY},UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY}" \
             --service-account=${{ env.PROJECT_ID }}@appspot.gserviceaccount.com \
             --allow-unauthenticated
+
+          echo "Deployment completed."
+
+      - name: Show Output
+        if: steps.build_step.outputs.build_status == 'success'
+        run: |
+          echo "Deployed to Cloud Run service ${{ env.SERVICE_NAME }} in region ${{ env.REGION }}"
+          gcloud run services describe ${{ env.SERVICE_NAME }} --region ${{ env.REGION }} --format 'value(status.url)'
+
+      - name: Debug on Failure
+        if: failure()
+        run: |
+          echo "Debug information on failure:"
+          echo "PROJECT_ID: ${{ env.PROJECT_ID }}"
+          echo "SERVICE_NAME: ${{ env.SERVICE_NAME }}"
+          echo "GITHUB_SHA: ${{ github.sha }}"
+          echo "Checking if image exists:"
+          gcloud container images list-tags "gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}" --limit=5 || echo "Failed to list images"
       
       - name: Set up Pub/Sub (first deployment only)
         if: ${{ steps.set-env.outputs.environment == 'dev' }}
