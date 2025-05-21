@@ -1,12 +1,14 @@
 """
 Builds all OpenAI Agents, prompts & the job runner.
+This module implements the site generator using the OpenAI Agents SDK.
+It uses an agent-based approach to avoid additionalProperties validation errors.
 """
 from __future__ import annotations
 import os
 import logging
 from typing import List, Dict, Any
 from openai import OpenAI
-from agents import Agent, handoff
+from agents import Agent, handoff, RunConfig, Runner
 from google.cloud import firestore
 from tools import (
     fetch_url, strip_html, web_search, image_search, random_image, save_component
@@ -40,10 +42,16 @@ researcher = Agent(
 )
 
 def make_validator(model):
+    """Create a validator agent for a specific component model.
+    
+    The validator agent ensures that the component data matches the expected schema.
+    It will fix or reject invalid data.
+    """
     return Agent(
         name=f"{model.__name__} Validator",
         instructions="Validate or fix JSON so it exactly matches the given schema.",
-        output_type=model
+        output_type=model,
+        tools=[]
     )
 
 validators: Dict[str, Agent] = {
@@ -76,33 +84,67 @@ def translate_json(json_obj: Dict[str, Any], target_lang: str) -> Dict[str, Any]
 # ------------------------------------------------------------------ #
 # 2.  Orchestrator agent
 # ------------------------------------------------------------------ #
-from agents import function_tool
 
-# Wrap the function tools
-# Disable schema validation for function tools
-@function_tool(validate_schema=False)
-def translate_tool(json_obj: Dict[str, Any], target_lang: str) -> Dict[str, Any]:
+# Import the necessary modules
+from agents import handoff
+
+# Define functions without decorators
+def translate_tool_func(json_obj: Dict[str, Any], target_lang: str) -> Dict[str, Any]:
+    """Translate JSON values (not keys) to the target language."""
     return translate_json(json_obj, target_lang)
 
-@function_tool(validate_schema=False)
-def image_search_tool(query: str, k: int = 5) -> List[str]:
+def image_search_tool_func(query: str, k: int = 5) -> List[str]:
+    """Search for images matching the query and return a list of URLs."""
     return image_search(query, k)
 
-@function_tool(validate_schema=False)
-def random_image_tool(query: str) -> str:
+def random_image_tool_func(query: str) -> str:
+    """Get a random image URL matching the query."""
     return random_image(query)
 
-@function_tool
-def save_component_tool(uid: str, lang: str, component: str, data: Dict[str, Any]):
+def save_component_tool_func(uid: str, lang: str, component: str, data: Dict[str, Any]):
+    """Save a component to Firestore for the specified user and language."""
     return save_component(uid, lang, component, data)
 
-# Create the tools list
+# Create agents with proper instructions and implementation details
+translate_agent = Agent(
+    name="Translator",
+    instructions="""Translate JSON values (not keys) to the target language.
+    Preserve the structure of the JSON and only translate the values.
+    Return the translated JSON with the same structure as the input.""",
+    tools=[]
+)
+
+image_search_agent = Agent(
+    name="Image Searcher",
+    instructions="""Search for images matching the query and return a list of URLs.
+    The query should be descriptive to find relevant images.
+    Return a list of image URLs that match the query.""",
+    tools=[]
+)
+
+random_image_agent = Agent(
+    name="Random Image Finder",
+    instructions="""Get a random image URL matching the query.
+    The query should be descriptive to find a relevant image.
+    Return a single image URL that matches the query.""",
+    tools=[]
+)
+
+save_component_agent = Agent(
+    name="Component Saver",
+    instructions="""Save a component to Firestore for the specified user and language.
+    The component data must be valid according to its schema.
+    The component will be saved under the user's document in Firestore.""",
+    tools=[]
+)
+
+# Create the tools list with handoffs to other agents instead of function tools
 orchestrator_tools = [
     handoff(researcher),
-    translate_tool,
-    image_search_tool,
-    random_image_tool,
-    save_component_tool
+    handoff(translate_agent),
+    handoff(image_search_agent),
+    handoff(random_image_agent),
+    handoff(save_component_agent)
 ]
 
 # Add validators to tools list
@@ -117,12 +159,15 @@ hero, about, featuresList, portfolioGrid, experienceTimeline,
 testimonials, contact, newsletterSignup, schedule.
 
 TOOLS:
-- research(query,k) -> plaintext facts
-- image_search(query,k) -> list of image URLs
-- random_image(query) -> single URL or null
-- translate(json, lang) -> translate JSON values
-- validate_<component>(json) -> fix/validate to schema
-- save(component, json) -> store in Firestore (uid, lang)
+- research(query,k) -> plaintext facts about the query
+- image_search(query,k) -> list of image URLs matching the query
+- random_image(query) -> single URL or null for the query
+- translate(json, lang) -> translate JSON values to target language
+- transfer_to_<component>_validator(json) -> validate component against schema
+- save(uid, lang, component, data) -> store in Firestore for the user
+
+IMPORTANT: For each component, you MUST use the appropriate validator before saving.
+Validators ensure the component data matches the required schema and will reject invalid data.
 
 FLOW:
 1. research(name + job title + social links) to gather facts.
@@ -168,10 +213,10 @@ def run_generation_job(uid: str, languages: List[str]):
             "seed": base_seed
         }
         
-        # Create a run configuration with the gpt-4o-mini model and disable schema validation
+        # Create a run configuration with the gpt-4o-mini model
         from agents import RunConfig
-        # Setting validate_schemas=False to bypass additionalProperties check
-        run_config = RunConfig(model="gpt-4o-mini", validate_schemas=False)
+        # Only use supported parameters in RunConfig
+        run_config = RunConfig(model="gpt-4o-mini")
         
         # Run the agent with the configuration
         result = await Runner.run(

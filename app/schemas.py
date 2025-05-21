@@ -13,6 +13,7 @@ class StrictBaseModel(BaseModel):
     model_config = {
         "extra": "forbid",  # Forbid extra fields during validation
         "validate_assignment": True,
+        "json_schema_extra": lambda schema: schema.pop("additionalProperties", None),
     }
     
     @classmethod
@@ -22,6 +23,11 @@ class StrictBaseModel(BaseModel):
         # Remove additionalProperties from the schema
         if "additionalProperties" in schema:
             del schema["additionalProperties"]
+        # Also recursively remove additionalProperties from any nested objects
+        if "properties" in schema:
+            for prop_schema in schema["properties"].values():
+                if isinstance(prop_schema, dict) and "additionalProperties" in prop_schema:
+                    del prop_schema["additionalProperties"]
         return schema
 
 class HeroComponent(StrictBaseModel):
