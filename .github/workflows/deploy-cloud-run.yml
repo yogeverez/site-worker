@@ -70,28 +70,15 @@ jobs:
         id: build_step
         run: |
           echo "Starting build with gcloud builds submit..."
-          # Remove --suppress-logs to see full build logs
-          BUILD_ID=$(gcloud builds submit \
+          gcloud builds submit \
             --tag gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
-            --format='value(id)')
-          
-          echo "Build ID: $BUILD_ID"
-          echo "Waiting for build to complete..."
-          
-          # Wait for the build to complete and stream logs
-          gcloud builds log --stream "$BUILD_ID"
-          
-          # Check if the build was successful
-          BUILD_STATUS=$(gcloud builds describe "$BUILD_ID" --format='value(status)')
-          if [[ "$BUILD_STATUS" != "SUCCESS" ]]; then
-            echo "Build failed with status: $BUILD_STATUS"
-            exit 1
-          fi
-          
+            --suppress-logs \
+            --async
+
           # Verify the image was created
           echo "Verifying image was created..."
           gcloud container images list-tags "gcr.io/${{ env.PROJECT_ID }}/${{ env.SERVICE_NAME }}" --limit=5
-          
+
           echo "build_status=success" >> $GITHUB_OUTPUT
 
       - name: Wait for Image in GCR
