@@ -2,6 +2,8 @@
 Builds all OpenAI Agents, prompts & the job runner.
 """
 from __future__ import annotations
+import os
+import logging
 from typing import List, Dict, Any
 from openai import OpenAI
 from agents import Agent, handoff
@@ -11,7 +13,17 @@ from tools import (
 )
 import schemas as sc
 
-client = OpenAI()
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize OpenAI client with API key from environment variable
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    logger.warning("OPENAI_API_KEY environment variable is not set")
+    
+# Create OpenAI client with default model set to gpt-4o-mini
+client = OpenAI(api_key=api_key, default_model="gpt-4o-mini")
 
 # ------------------------------------------------------------------ #
 # 1.  Sub-agents
@@ -154,12 +166,18 @@ def run_generation_job(uid: str, languages: List[str]):
             "lang": lang,
             "seed": base_seed
         }
+        
+        # Create a run configuration with the gpt-4o-mini model
+        from agents import RunConfig
+        run_config = RunConfig(model="gpt-4o-mini")
+        
+        # Run the agent with the configuration
         result = await Runner.run(
             orchestrator,
             input=prompt,
             context=context,
-            model="gpt-4o-mini",
-            max_turns=60
+            max_turns=60,
+            run_config=run_config
         )
         print(f"[{uid}] Generation finished for lang={lang}")
         return result

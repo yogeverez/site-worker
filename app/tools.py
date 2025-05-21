@@ -11,8 +11,11 @@ from bs4 import BeautifulSoup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize Firestore client with error handling for local development
+# Initialize Firestore client
 try:
+    # In Cloud Run, this will use the default service account credentials
+    # In local development, it will use Application Default Credentials if available
+    # or raise an exception which we'll catch
     from google.cloud import firestore
     db = firestore.Client()
     FIRESTORE_AVAILABLE = True
