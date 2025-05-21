@@ -20,6 +20,10 @@ env:
   PROJECT_ID_PROD: landing-aabbb
   SERVICE_NAME: site-worker
   REGION: us-central1
+  # These will be populated from GitHub secrets
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+  UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
 
 jobs:
   deploy:
@@ -56,6 +60,7 @@ jobs:
         uses: google-github-actions/auth@v1
         with:
           credentials_json: ${{ secrets[env.SA_KEY] }}
+          project_id: ${{ env.PROJECT_ID }}
       
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v1
@@ -96,9 +101,9 @@ jobs:
         if: steps.build_step.outputs.build_status == 'success'
         run: |
           # Escape commas in environment variables to avoid gcloud substitution issues
-          OPENAI_API_KEY=$(echo "${{ secrets.OPENAI_API_KEY }}" | sed 's/,/\\,/g')
-          SERPAPI_KEY=$(echo "${{ secrets.SERPAPI_KEY }}" | sed 's/,/\\,/g')
-          UNSPLASH_ACCESS_KEY=$(echo "${{ secrets.UNSPLASH_ACCESS_KEY }}" | sed 's/,/\\,/g')
+          OPENAI_API_KEY=$(echo "${{ env.OPENAI_API_KEY }}" | sed 's/,/\\,/g')
+          SERPAPI_KEY=$(echo "${{ env.SERPAPI_KEY }}" | sed 's/,/\\,/g')
+          UNSPLASH_ACCESS_KEY=$(echo "${{ env.UNSPLASH_ACCESS_KEY }}" | sed 's/,/\\,/g')
           
           echo "Deploying to Cloud Run..."
           gcloud run deploy ${{ env.SERVICE_NAME }} \
