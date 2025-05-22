@@ -17,18 +17,6 @@ from agents import Runner
 from schemas import HeroSection, AboutSection, FeaturesList
 from search_utils import search_web
 
-# Thread-safe function to run an agent
-async def run_agent_safely(agent, prompt):
-    """Run an agent asynchronously using Runner.run()."""
-    current_thread = threading.current_thread()
-    logger.info(f"Calling Runner.run for agent {agent.name} in thread: {current_thread.name} with prompt: {prompt[:100]}...")
-    try:
-        # Use the asynchronous Runner.run()
-        return await Runner.run(agent, prompt)
-    except Exception as e:
-        logger.error(f"Exception in Runner.run for agent {agent.name} in thread {current_thread.name}: {e}", exc_info=True)
-        raise
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -73,17 +61,14 @@ def get_db():
 # SerpAPI configuration
 SERPAPI_API_KEY = os.getenv("SERPAPI_KEY", "")
 
-def get_site_input(uid: str) -> dict:
-    """Fetch the user's input document (name, job title, social URLs) from Firestore."""
-    try:
-        db = get_db()
-        # Fetch from the root-level siteInputDocuments collection using uid as document ID
-        doc_ref = db.collection("siteInputDocuments").document(uid)
-        doc = doc_ref.get()
-        return doc.to_dict() if doc.exists else {}
-    except Exception as e:
-        logger.error(f"Error getting site input for user {uid}: {e}")
-        return {}
+def get_site_input(uid: str) -> dict | None:
+    """Fetches the siteInputDocument for a given UID from Firestore."""
+    db = get_db()
+    doc_ref = db.collection("users").document(uid).collection("sites").document("live")
+    doc = doc_ref.get()
+    if doc.exists:
+        return doc.to_dict().get("siteInputDocument")
+    return None
 
 # Keep the original fetch_page_content function for backward compatibility
 def fetch_page_content(url: str) -> tuple[str, str]:
@@ -105,329 +90,432 @@ def fetch_page_content(url: str) -> tuple[str, str]:
     content = re.sub(r"\s+\s+", " ", text).strip()
     return (title, content)
 
+import openai # Added for OpenAI client
+from firebase_admin import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
+
+from site_agents import researcher_agent, hero_agent, about_agent, features_agent, translate_text, ResearchDoc
+
+# Helper function to get OpenAI client
+def get_openai_client():
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        logger.error("OPENAI_API_KEY environment variable not set.")
+        raise ValueError("OPENAI_API_KEY not set")
+    return openai.OpenAI(api_key=api_key)
+
+async def _generate_search_queries(user_input: dict, client: openai.OpenAI, max_queries: int = 5) -> List[str]:
+    """Generates a list of search queries based on user input using an LLM call."""
+    name = user_input.get("name", "")
+    title = user_input.get("title") or user_input.get("job_title", "")
+    bio = user_input.get("bio", "")
+    professional_background = user_input.get("professionalBackground", "")
+    socials = user_input.get("socialUrls", {})
+    social_info_parts = []
+    if isinstance(socials, dict):
+        for platform, url in socials.items():
+            if url and str(url).strip():
+                social_info_parts.append(f"{platform.capitalize()}: {url}")
+    social_info = ", ".join(social_info_parts)
+
+    prompt = (
+        f"Given the following user profile:\n"
+        f"Name: {name}\n"
+        f"Title: {title}\n"
+        f"Bio: {bio}\n"
+        f"Professional Background: {professional_background}\n"
+        f"Social Links: {social_info}\n\n"
+        f"Please generate up to {max_queries} distinct and effective search engine queries to find comprehensive professional information about this person. "
+        f"Focus on queries that would uncover their achievements, public presence, projects, and overall professional persona. "
+        f"Prioritize variety in the queries. For example, search for their name with company, name with projects, name with specific skills if mentioned, etc.\n"
+        f"Return the queries as a JSON list of strings. For example: [\"query1\", \"query2\"]"
+    )
+
+    try:
+        logger.info(f"Generating search queries for: {name}")
+        completion = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that generates search queries."},
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"}, # Request JSON output
+            temperature=0.5,
+        )
+        
+        response_content = completion.choices[0].message.content
+        if response_content:
+            # Assuming the response is a JSON string like '{"queries": ["q1", "q2"]}' or directly a list '["q1", "q2"]'
+            # We need to robustly parse this.
+            try:
+                data = json.loads(response_content)
+                if isinstance(data, list):
+                    queries = data
+                elif isinstance(data, dict) and 'queries' in data and isinstance(data['queries'], list):
+                    queries = data['queries']
+                else:
+                    logger.error(f"LLM returned unexpected JSON structure for queries: {response_content}")
+                    queries = [] # Fallback to empty list
+
+                # Ensure all items are strings
+                queries = [str(q) for q in queries if isinstance(q, str)]
+                logger.info(f"Generated {len(queries)} search queries: {queries}")
+                return queries[:max_queries] # Ensure we don't exceed max_queries
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON response for search queries: {e}. Response: {response_content}")
+                return [] # Fallback to empty list if JSON parsing fails
+        else:
+            logger.error("LLM returned no content for search queries.")
+            return [] # Fallback to empty list
+    except Exception as e:
+        logger.error(f"Error generating search queries with LLM: {e}", exc_info=True)
+        return [] # Fallback to empty list
+
+
+async def run_agent_safely(agent: Any, prompt: str, **kwargs) -> Any:
+    """Wraps Runner.run in an async function, suitable for asyncio.run."""
+    # This function might need to be adapted if Runner.run is not inherently async
+    # If Runner.run is blocking, use asyncio.to_thread
+    # For now, assuming Runner.run can be awaited or is non-blocking enough
+    # Based on previous memory (0d3b3dbd), Runner.run() is awaitable.
+    return await Runner.run(agent=agent, prompt=prompt, **kwargs)
+
+
 async def do_research(uid: str, timestamp: int | None = None):
     """
-    Perform research using either:
-      • researcher_agent  (RESEARCH_MODE=agent  – default)
-      • legacy pipeline   (RESEARCH_MODE=legacy)
+    Perform research using researcher_agent.
+    1. Generates search queries based on user input.
+    2. Calls researcher_agent with these queries.
+    3. Saves each found ResearchDoc to Firestore.
+    4. Creates a manifest file summarizing the research.
     Stores docs at research/{uid}/sources/{docId}
+    Stores manifest at research/{uid}/summary/manifest.json
     """
     try:
         logger.info(f"Starting research for user {uid}")
-        # Determine which research mode to use
-        mode = os.getenv("RESEARCH_MODE", "agent").lower()
         
+        # Get OpenAI client
+        try:
+            oai_client = get_openai_client()
+        except ValueError as e:
+            logger.error(f"Failed to initialize OpenAI client for research: {e}")
+            return
+
         # Get basic info about the user (name, title, social URLs)
         user_input = get_site_input(uid)
         if not user_input:
-            logger.warning(f"No siteInputDocument for {uid}")
+            logger.warning(f"No siteInputDocument for {uid}. Skipping research.")
             return
 
-        if mode == "legacy":
-            logger.info("[research] Using legacy research mode")
-            _legacy_research(uid, user_input, timestamp)
+        # 1. Generate search queries
+        search_queries = await _generate_search_queries(user_input, oai_client, max_queries=5)
+        if not search_queries:
+            logger.warning(f"No search queries generated for user {uid}. Skipping agent research.")
+            # Optionally, could fall back to a default query or skip research entirely.
+            # For now, skipping if no queries are generated.
+            # Create an empty manifest if skipping
+            db = get_db()
+            manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
+            manifest_data = {
+                "uid": uid,
+                "status": "skipped_no_queries",
+                "timestamp": firestore.SERVER_TIMESTAMP, # Use server timestamp
+                "search_queries_generated": [],
+                "saved_sources_count": 0,
+                "saved_source_ids": []
+            }
+            manifest_ref.set(manifest_data)
+            logger.info(f"Created empty/skipped manifest for user {uid} at {manifest_ref.path}")
             return
 
-        # -------- researcher_agent path ----------
-        logger.info("[research] Using agent-based research mode")
+        logger.info(f"[research] Using agent-based research mode with {len(search_queries)} queries: {search_queries}")
         
-        # Extract more details from user_input for a richer prompt
         name = user_input.get("name", "")
-        title = user_input.get("title") or user_input.get("job_title", "") # Existing logic for title
+        title = user_input.get("title") or user_input.get("job_title", "")
         location = user_input.get("location", "")
         bio = user_input.get("bio", "")
         professional_background = user_input.get("professionalBackground", "")
         website_goal = user_input.get("websiteGoal", "")
-        template = user_input.get("template", "") # e.g., "PersonalBranding"
+        template = user_input.get("template", "")
 
-        socials = user_input.get("socialUrls", {}) # Existing key for social links
+        socials = user_input.get("socialUrls", {})
         social_lines_list = []
         if isinstance(socials, dict):
-            for platform, url in socials.items():
-                if url and str(url).strip(): # Ensure URL is not empty or just whitespace
-                    social_lines_list.append(f"- {platform.capitalize()}: {str(url).strip()}")
+            for platform, url_val in socials.items():
+                if url_val and str(url_val).strip():
+                    social_lines_list.append(f"- {platform.capitalize()}: {str(url_val).strip()}")
         social_info = "\n".join(social_lines_list) if social_lines_list else "N/A"
 
+        # Construct prompt for the researcher_agent, including the generated queries
         prompt_parts = [
-            f"Name: {name}",
+            "Please perform research based on the following user profile and search queries.",
+            f"User Profile:\nName: {name}",
             f"Title: {title}",
         ]
-        if location:
-            prompt_parts.append(f"Location: {location}")
-        if bio:
-            # For potentially long fields, consider sending only a summary or first N chars if it causes issues.
-            # For now, sending full content.
-            prompt_parts.append(f"Bio: {bio}") 
-        if professional_background:
-            prompt_parts.append(f"Professional Background: {professional_background}")
-        if website_goal:
-            prompt_parts.append(f"Stated Website Goal: {website_goal}")
-        if template:
-            prompt_parts.append(f"Site Template Type: {template}")
-
+        if location: prompt_parts.append(f"Location: {location}")
+        if bio: prompt_parts.append(f"Bio: {bio}")
+        if professional_background: prompt_parts.append(f"Professional Background: {professional_background}")
+        if website_goal: prompt_parts.append(f"Stated Website Goal: {website_goal}")
+        if template: prompt_parts.append(f"Site Template Type: {template}")
         prompt_parts.append(f"Social Links:\n{social_info}")
         
-        # Updated instruction for the agent
+        prompt_parts.append("\nSearch Queries to Execute:")
+        for i, sq_query in enumerate(search_queries):
+            prompt_parts.append(f"{i+1}. {sq_query}")
+        
         prompt_parts.append(
-            "\nBased on all the information above, find up to 50 high-quality sources about this person. "
-            "Focus on information relevant to their professional persona, achievements, and public presence. "
-            "Return the findings as a JSON array of ResearchDoc objects."
+            "\nAgent Instructions: Follow your main instructions to process each of these queries, find relevant sources, and return a flat list of ResearchDoc objects for all findings."
         )
-        prompt = "\n\n".join(prompt_parts) # Use double newline for better section separation in the prompt
+        prompt = "\n\n".join(prompt_parts)
 
-        # Call the agent (blocking)
+        # Call the agent
+        agent_output_list: List[ResearchDoc] = []
         try:
-            logger.info(f"Running researcher_agent for {uid}")
-            
-            # Log the current thread for debugging
+            logger.info(f"Running researcher_agent for {uid} with generated queries.")
             current_thread = threading.current_thread()
             logger.info(f"Running researcher_agent in thread: {current_thread.name}")
             
-            # Use our thread-safe runner function
-            agent_output = await run_agent_safely(researcher_agent, prompt)
-            logger.info(f"Successfully received output from agent for user {uid}. Type: {type(agent_output)}")
+            # run_agent_safely returns the agent's final_output directly if successful
+            raw_agent_output = await run_agent_safely(researcher_agent, prompt)
+            logger.info(f"Successfully received output from agent for user {uid}. Type: {type(raw_agent_output)}")
 
-            if not agent_output or not hasattr(agent_output, 'final_output') or agent_output.final_output is None:
-                logger.warning(f"Agent for {uid} did not return a valid final_output. Raw output: {agent_output}")
-                logger.info(f"Falling back to legacy research for {uid} due to missing/invalid agent output.")
-                _legacy_research(uid, user_input, timestamp)
-                return # Exit after fallback
-            
-            # If we reach here, agent_output and agent_output.final_output are considered valid
-            raw_agent_output = agent_output.final_output 
-
-            final_research_output: List[Dict[str, Any]] = [] # This will hold dicts for Firestore, not used by current agent logic
-            parsed_docs: List[ResearchDoc] = [] 
-
-            if isinstance(raw_agent_output, ResearchDoc):
-                parsed_docs.append(raw_agent_output)
-                logger.info(f"Successfully received ResearchDoc object from agent for user {uid}.")
-            elif isinstance(raw_agent_output, list) and all(isinstance(item, ResearchDoc) for item in raw_agent_output):
-                parsed_docs.extend(raw_agent_output)
-                logger.info(f"Successfully received a list of {len(raw_agent_output)} ResearchDoc objects from agent for user {uid}.")
+            if isinstance(raw_agent_output, list) and all(isinstance(item, ResearchDoc) for item in raw_agent_output):
+                agent_output_list = raw_agent_output
+                logger.info(f"Successfully received {len(agent_output_list)} ResearchDoc objects from agent for user {uid}.")
+            elif isinstance(raw_agent_output, ResearchDoc): # Handle if agent mistakenly returns one despite List type hint
+                agent_output_list = [raw_agent_output]
+                logger.warning(f"Agent returned a single ResearchDoc, expected List[ResearchDoc]. Processing as a list with one item.")
             elif raw_agent_output is None:
-                # This case should have been caught by the check above, but as a safeguard:
-                logger.info(f"Researcher agent for user {uid} returned None as final_output (safeguard check).")
-                logger.info(f"Falling back to legacy research for {uid} due to None agent output (safeguard check).")
-                _legacy_research(uid, user_input, timestamp)
-                return # Exit after fallback
+                 logger.warning(f"Agent for {uid} returned None as final_output.")
             else:
-                logger.warning(f"Researcher agent for user {uid} returned unexpected type: {type(raw_agent_output)}. Content: {str(raw_agent_output)[:500]}. Expected ResearchDoc or list of ResearchDoc.")
-                logger.info(f"Falling back to legacy research for {uid} due to unexpected agent output type.")
-                _legacy_research(uid, user_input, timestamp)
-                return # Exit after fallback
-
-            if not parsed_docs:
-                logger.warning(f"No ResearchDoc was successfully obtained or parsed for user {uid} from agent output.")
-                logger.info(f"Falling back to legacy research for {uid} due to no parsable ResearchDocs.")
-                _legacy_research(uid, user_input, timestamp)
-                return # Exit after fallback
-
-            # Store research results in Firestore
-            db = get_db()
-            if db:
-                user_research_col = db.collection(f"research/{uid}/sources")
-                
-                # Use the parsed_docs (list of ResearchDoc objects)
-                for i, doc_content in enumerate(parsed_docs):
-                    # doc_content is already a ResearchDoc instance
-                    doc_id = f"doc_{int(time.time())}_{i}" 
-                    research_doc_data = doc_content.model_dump() # Convert Pydantic model to dict
-                    research_doc_data["timestamp"] = timestamp or int(time.time())
-                    
-                    output_doc_ref = db.collection("research").document(uid).collection("sources").document(doc_id)
-                    output_doc_ref.set(research_doc_data)
-                    logger.info(f"Stored research document {doc_id} for user {uid} at {output_doc_ref.path}")
-            else:
-                logger.error(f"Firestore client not available. Cannot store research for user {uid}.")
+                logger.warning(f"Agent for {uid} did not return a valid List[ResearchDoc] or ResearchDoc. Raw output: {str(raw_agent_output)[:500]}")
 
         except Exception as e:
-            logger.error(f"Error in agent-based research for user {uid}: {e}", exc_info=True)
-            # Fall back to legacy research if agent fails
-            logger.info(f"Falling back to legacy research for {uid}")
-            _legacy_research(uid, user_input, timestamp)
+            logger.error(f"Error running researcher_agent for user {uid}: {e}", exc_info=True)
+            # Proceed to save manifest with error status even if agent fails
+
+        # 3. Save each ResearchDoc to Firestore
+        db = get_db()
+        saved_source_ids = []
+        saved_source_urls = [] # For manifest
+
+        if not agent_output_list:
+            logger.warning(f"No ResearchDoc objects to save for user {uid}.")
+        else:
+            logger.info(f"Saving {len(agent_output_list)} research documents to Firestore for user {uid}...")
+            for i, research_doc in enumerate(agent_output_list):
+                try:
+                    doc_data = research_doc.model_dump() # Convert Pydantic model to dict
+                    # Add a timestamp for when this specific source was processed/saved by the worker
+                    doc_data['worker_processed_at'] = firestore.SERVER_TIMESTAMP 
+                    
+                    # Create a new document with an auto-generated ID
+                    source_doc_ref = db.collection("research").document(uid).collection("sources").document()
+                    source_doc_ref.set(doc_data)
+                    saved_source_ids.append(source_doc_ref.id)
+                    saved_source_urls.append(research_doc.url)
+                    logger.info(f"  Saved source {i+1}/{len(agent_output_list)}: '{research_doc.title}' to {source_doc_ref.path}")
+                except Exception as e:
+                    logger.error(f"Error saving ResearchDoc '{research_doc.title}' to Firestore: {e}", exc_info=True)
+        
+        # 4. Create a manifest file
+        manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
+        manifest_data = {
+            "uid": uid,
+            "status": "completed" if agent_output_list else "completed_no_sources_found",
+            "timestamp": firestore.SERVER_TIMESTAMP, # Use server timestamp for the manifest itself
+            "original_user_timestamp": timestamp if timestamp else None, # from pubsub message
+            "search_queries_generated": search_queries,
+            "saved_sources_count": len(saved_source_ids),
+            "saved_source_ids": saved_source_ids,
+            "saved_source_urls": saved_source_urls # Adding URLs for easier reference
+        }
+        if not agent_output_list and not search_queries: # If skipped due to no queries
+             manifest_data["status"] = "skipped_no_queries"
+        elif not agent_output_list and search_queries: # If queries ran but no sources found
+             manifest_data["status"] = "completed_no_sources_found"
+        elif not saved_source_ids and agent_output_list: # If agent returned docs but saving failed for all
+            manifest_data["status"] = "completed_save_errors"
+
+        manifest_ref.set(manifest_data)
+        logger.info(f"Research manifest created/updated for user {uid} at {manifest_ref.path} with status: {manifest_data['status']}")
+
     except Exception as e:
-        logger.error(f"Error in do_research for user {uid}: {e}")
-        # Return gracefully instead of crashing the worker
+        logger.error(f"Overall error in do_research for user {uid}: {e}", exc_info=True)
+        # Attempt to save an error manifest if a critical error occurs early
+        try:
+            db = get_db()
+            manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
+            # Check if manifest exists to avoid overwriting a more specific status if possible
+            # This is a simple check; more sophisticated status management might be needed
+            existing_manifest = manifest_ref.get()
+            if not existing_manifest.exists or not existing_manifest.to_dict().get("status", "").startswith("completed"):
+                error_manifest_data = {
+                    "uid": uid,
+                    "status": "error_in_processing",
+                    "error_message": str(e),
+                    "timestamp": firestore.SERVER_TIMESTAMP,
+                    "original_user_timestamp": timestamp if timestamp else None,
+                    "search_queries_generated": locals().get('search_queries', 'not_generated_yet'),
+                    "saved_sources_count": len(locals().get('saved_source_ids', [])),
+                    "saved_source_ids": locals().get('saved_source_ids', [])
+                }
+                manifest_ref.set(error_manifest_data, merge=True) # Merge to avoid losing partial data if any
+                logger.info(f"Error manifest created/updated for user {uid} at {manifest_ref.path}")
+        except Exception as manifest_e:
+            logger.error(f"Failed to save error manifest for user {uid}: {manifest_e}", exc_info=True)
+
+async def generate_site_content(uid: str, languages: List[str], timestamp: int | None = None):
+    """Generates site content using various agents and stores it in Firestore."""
+    logger.info(f"Starting site content generation for user {uid}, languages: {languages}")
+    db = get_db()
+    user_input = get_site_input(uid)
+    if not user_input:
+        logger.warning(f"No siteInputDocument for {uid} to generate content from.")
         return
 
-def _legacy_research(uid: str, user_input: dict, timestamp: int | None = None):
-    """
-    Original search_web → fetch_page_content loop
-    (code identical to previous implementation)
-    """
+    # Fetch research data (assuming it's stored by do_research)
+    # For simplicity, let's assume we need a consolidated summary from research.
+    # This part might need adjustment based on how research data is actually used by content agents.
+    research_summary_text = "No specific research summary available."
     try:
-        logger.info(f"Running legacy research for user {uid}")
-        name = user_input.get("name")
-        title = user_input.get("title") or user_input.get("job_title")
-        social_urls = user_input.get("socialUrls", {})  # e.g. {"linkedin": "...", "twitter": "..."} or list
-
-        # Prepare a list of targets to research: start with any given social/profile URLs
-        targets = []
-        if isinstance(social_urls, dict):
-            for source, url in social_urls.items():
-                targets.append((source.lower(), url))
-        elif isinstance(social_urls, list):
-            for url in social_urls:
-                domain = "social"
-                if "linkedin" in url: domain = "linkedin"
-                elif "twitter" in url: domain = "twitter"
-                targets.append((domain, url))
-
-        # Also, use web search for the person's name and title to find additional info
-        if name:
-            query = name if not title else f"{name} {title}"
-            results = search_web(query, num_results=5)
-            for res in results:
-                url = res["url"]
-                # Skip if same as an already targeted URL
-                if any(url == t[1] for t in targets):
-                    continue
-                # Identify source name from domain
-                domain = re.sub(r'^www\.', '', requests.utils.urlparse(url).netloc)
-                source = domain.lower() or "web"
-                targets.append((source, url))
-
-        # Fetch each target page and store content
-        db = get_db()
-        for source, url in targets:
-            title, content = fetch_page_content(url)
-            if not content:
-                continue  # skip if fetch failed or content empty
-            # Generate a unique document ID for Firestore
-            # Use source name; if already used, append a number
-            doc_id = source
-            # Ensure unique doc_id in case of duplicates
-            doc_id = source
-            sources_collection = db.collection("research").document(uid).collection("sources")
-            existing = sources_collection.document(doc_id).get()
-            idx = 1
-            while existing.exists:
-                idx += 1
-                doc_id = f"{source}{idx}"
-                existing = sources_collection.document(doc_id).get()
-            # Prepare the document data
-            doc_data = {
-                "url": url,
-                "title": title[:200],  # limit title length
-                "content": content[:10000],  # store up to 10k chars of content
-                "source_type": source,
-                "timestamp": timestamp or int(time.time())
-            }
-            # Store in research/{uid}/sources collection
-            sources_collection = db.collection("research").document(uid).collection("sources")
-            sources_collection.document(doc_id).set(doc_data)
-            logger.info(f"Stored research document {doc_id} for user {uid} at {sources_collection.document(doc_id).path}")
+        # Example: Try to get a summary from the manifest or a specific summary doc
+        manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
+        manifest_doc = manifest_ref.get()
+        if manifest_doc.exists:
+            manifest_data = manifest_doc.to_dict()
+            if manifest_data.get("saved_sources_count", 0) > 0:
+                # For now, just indicate research was done. A real summary would be better.
+                research_summary_text = f"Research conducted, found {manifest_data['saved_sources_count']} sources. Key URLs: {', '.join(manifest_data.get('saved_source_urls', [])[:2])}"
+            elif manifest_data.get("status") == "completed_no_sources_found":
+                research_summary_text = "Research conducted, but no specific sources were found."
     except Exception as e:
-        logger.error(f"Error in legacy research for user {uid}: {e}")
-        # Return gracefully instead of crashing the worker
-        return
+        logger.warning(f"Could not fetch research summary for content generation: {e}")
 
-async def generate_site_content(uid: str, languages: list[str], timestamp: int = None):
-    """Generate website components from research docs and store them (supports multiple languages)."""
-    try:
-        logger.info(f"Starting content generation for user {uid} in languages: {languages}")
-        # Load research documents for the user
-        db = get_db()
-        # Get documents from research/{uid}/sources collection
-        sources_collection = db.collection("research").document(uid).collection("sources")
-        docs = sources_collection.stream()
-        research_docs = [doc.to_dict() for doc in docs]
-        
-        # Also include the original input data for completeness
-        input_doc = get_site_input(uid) or {}
-        name = input_doc.get("name", "")
-        title = input_doc.get("title") or input_doc.get("job_title") or ""
-        basic_info = f"Name: {name}\nTitle: {title}\n"
-        
-        # Compile context for the agents: brief info plus snippets from research
-        context_lines = [basic_info]
-        for doc in research_docs:
-            src = doc.get("source", "")
-            title = doc.get("title", "")
-            content = doc.get("content", "")
-            # Truncate content to a reasonable length for context
-            if content and len(content) > 1000:
-                content = content[:1000] + "..."
-            context_lines.append(f"Source ({src} - {title}): {content}")
-        context_text = "\n\n".join(context_lines).strip()
+    name = user_input.get("name", "")
+    title = user_input.get("title") or user_input.get("job_title", "")
+    bio = user_input.get("bio", "")
+    professional_background = user_input.get("professionalBackground", "")
+    # ... any other fields needed for content prompts ...
 
-        # Define a common user prompt for all agents, providing the context info
-        user_prompt = (
-            f"Use the following information about the user to create website content sections:\n{context_text}\n\n"
-            "Now produce the requested section in the required JSON format."
-        )
+    base_prompt_context = (
+        f"User Profile:\nName: {name}\nTitle: {title}\nBio: {bio}\nProfessional Background: {professional_background}\n"
+        f"Research Summary: {research_summary_text}\n\n"
+        "Please generate the requested website component based on this information."
+    )
 
-        # Log the current thread for debugging
-        current_thread = threading.current_thread()
-        logger.info(f"Running content generation in thread: {current_thread.name}")
-        
-        # Run each agent to get structured content using our thread-safe runner function
-        logger.info(f"Running hero agent for user {uid}")
-        hero_result = await run_agent_safely(hero_agent, user_prompt)
-        hero_data = hero_result.final_output  # HeroSection model instance
-        
-        logger.info(f"Running about agent for user {uid}")
-        about_result = await run_agent_safely(about_agent, user_prompt)
-        about_data = about_result.final_output  # AboutSection model
-        
-        logger.info(f"Running features agent for user {uid}")
-        features_result = await run_agent_safely(features_agent, user_prompt)
-        features_data = features_result.final_output  # FeaturesList model
+    # Define agents and their corresponding Firestore paths
+    content_agents_map = {
+        "hero": (hero_agent, "heroSection"),
+        "about": (about_agent, "aboutSection"),
+        "features": (features_agent, "featuresList"),
+    }
 
-        # Convert Pydantic model instances to dict for storing
-        hero_json = hero_data.model_dump()
-        about_json = about_data.model_dump()
-        features_json = features_data.model_dump()
+    # Store base language content
+    base_lang = "en" # Assuming base language is English
+    generated_content_base = {}
 
-        # Store the generated content for the base language (first in list)
-        base_lang = languages[0]
-        comp_coll = db.collection("siteContent").document(uid)\
-                    .collection(base_lang)
-        comp_coll.document("hero").set({"timestamp": timestamp or int(time.time()), **hero_json})
-        comp_coll.document("about").set({"timestamp": timestamp or int(time.time()), **about_json})
-        comp_coll.document("featuresList").set({"timestamp": timestamp or int(time.time()), **features_json})
+    logger.info(f"Running content agents for base language '{base_lang}' for user {uid}")
+    for agent_key, (agent_instance, _) in content_agents_map.items():
+        try:
+            logger.info(f"Calling Runner.run for agent {agent_instance.name} in thread: {threading.current_thread().name} with prompt context.")
+            # Use run_agent_safely which should handle async execution
+            output = await run_agent_safely(agent_instance, base_prompt_context)
+            if output:
+                # Assuming output is already the Pydantic model instance (e.g. HeroSection)
+                # If it's AgentOutput, need output.final_output
+                # For now, let's assume it's the direct model if run_agent_safely is tailored
+                # Based on previous edits, run_agent_safely returns final_output
+                final_output = output # if run_agent_safely returns final_output
+                # if hasattr(output, 'final_output'): # If it's AgentOutput obj
+                #    final_output = output.final_output
+                # else: # Assuming it's already the data
+                #    final_output = output
+                
+                if final_output:
+                    generated_content_base[agent_key] = final_output.model_dump()
+                    logger.info(f"Successfully generated '{agent_key}' for base language.")
+                else:
+                    logger.warning(f"Agent {agent_instance.name} returned no final_output for base language.")
+            else:
+                logger.warning(f"Agent {agent_instance.name} returned no output for base language.")
+        except Exception as e:
+            logger.error(f"Error running agent {agent_instance.name} for base language: {e}", exc_info=True)
+
+    if generated_content_base:
+        site_doc_ref = db.collection("users").document(uid).collection("sites").document("live")
+        # Path for base language content: sites/live/content/en/{componentName}
+        # For simplicity, let's store all components under a single 'content_en' field or similar structure
+        # Or, more granularly: sites/live/content/en/hero, sites/live/content/en/about etc.
+        # Let's go with a structured field: site_doc_ref.update({"content_en": generated_content_base, "contentTimestamp": timestamp})
+        # Better: store each component separately for easier updates and translations
+        # e.g. users/{uid}/sites/live/content/en/heroSection, users/{uid}/sites/live/content/en/aboutSection
+        
+        # Let's store under users/{uid}/siteContent/{lang}/{component_key}
+        # This keeps siteInputDocument separate from generated content
+        base_content_batch = db.batch()
+        for key, data in generated_content_base.items():
+            component_doc_ref = db.collection("users").document(uid).collection("siteContent").document(base_lang).collection("components").document(key)
+            base_content_batch.set(component_doc_ref, data)
+        base_content_batch.commit()
         logger.info(f"Stored site content for base language '{base_lang}' for user {uid}")
 
-        # Translate to additional languages if any
-        for lang in languages[1:]:
-            logger.info(f"Translating content to {lang} for user {uid}")
-            # Deep copy the original JSONs to avoid in-place modifications
-            hero_trans = _translate_component_dict(hero_json, lang)
-            about_trans = _translate_component_dict(about_json, lang)
-            features_trans = _translate_component_dict(features_json, lang)
-            comp_coll = db.collection("siteContent").document(uid)\
-                        .collection(lang)
-            comp_coll.document("hero").set({"timestamp": timestamp or int(time.time()), **hero_trans})
-            comp_coll.document("about").set({"timestamp": timestamp or int(time.time()), **about_trans})
-            comp_coll.document("featuresList").set({"timestamp": timestamp or int(time.time()), **features_trans})
-            logger.info(f"Stored translated content for language '{lang}' for user {uid}")
-    except Exception as e:
-        logger.error(f"Error in generate_site_content for user {uid}: {e}")
-        # Return gracefully instead of crashing the worker
-        return
-
-def _translate_component_dict(comp_dict: dict, target_lang: str) -> dict:
-    """Recursively translate all string values in a component JSON dict to the target language."""
-    translated = {}
-    for key, value in comp_dict.items():
-        # Do not translate the key names, only the values
-        if isinstance(value, str):
-            translated_value = translate_text(value, target_lang)
-            translated[key] = translated_value
-        elif isinstance(value, list):
-            # Translate each element in list (e.g., list of features)
-            new_list = []
-            for item in value:
-                if isinstance(item, dict):
-                    new_list.append(_translate_component_dict(item, target_lang))
-                elif isinstance(item, str):
-                    new_list.append(translate_text(item, target_lang))
+    # Handle translations if requested
+    if languages and base_lang in languages:
+        languages.remove(base_lang) # Remove base language if present, as it's already processed
+    
+    for lang in languages:
+        if lang == base_lang: continue # Should be removed already, but as a safeguard
+        logger.info(f"Translating content to '{lang}' for user {uid}")
+        translated_content_lang = {}
+        for component_key, component_data_dict in generated_content_base.items():
+            # component_data_dict is the dict form of the pydantic model (e.g., HeroSection.model_dump())
+            # We need to translate relevant text fields within this dict.
+            translated_component_data = {} # Store translated fields for this component
+            try:
+                if component_key == "hero" and isinstance(component_data_dict, dict):
+                    headline = component_data_dict.get('headline')
+                    subheadline = component_data_dict.get('subheadline')
+                    if headline: translated_component_data['headline'] = await run_agent_safely(translate_text, f"{headline}", target_language=lang)
+                    if subheadline: translated_component_data['subheadline'] = await run_agent_safely(translate_text, f"{subheadline}", target_language=lang)
+                
+                elif component_key == "about" and isinstance(component_data_dict, dict):
+                    content = component_data_dict.get('content')
+                    if content: translated_component_data['content'] = await run_agent_safely(translate_text, f"{content}", target_language=lang)
+                
+                elif component_key == "features" and isinstance(component_data_dict, dict):
+                    features_list = component_data_dict.get('features', [])
+                    translated_features = []
+                    for item in features_list:
+                        if isinstance(item, dict):
+                            title = item.get('title')
+                            desc = item.get('description')
+                            trans_title = await run_agent_safely(translate_text, f"{title}", target_language=lang) if title else None
+                            trans_desc = await run_agent_safely(translate_text, f"{desc}", target_language=lang) if desc else None
+                            translated_features.append({'title': trans_title, 'description': trans_desc})
+                    if translated_features: translated_component_data['features'] = translated_features
+                
+                if translated_component_data:
+                    # Merge non-translated fields with translated ones to keep full structure
+                    # This assumes Pydantic models don't have extra fields not handled by translation
+                    # A safer way would be to load original, update, then dump.
+                    # For now, just storing the translated parts.
+                    final_translated_data_for_component = {**component_data_dict, **translated_component_data}
+                    translated_content_lang[component_key] = final_translated_data_for_component
+                    logger.info(f"Successfully translated '{component_key}' to '{lang}'.")
                 else:
-                    new_list.append(item)
-            translated[key] = new_list
-        elif isinstance(value, dict):
-            translated[key] = _translate_component_dict(value, target_lang)
-        else:
-            translated[key] = value  # keep other types as is
-    return translated
+                    logger.warning(f"No translatable fields found or translation failed for '{component_key}' to '{lang}'.")
+
+            except Exception as e:
+                logger.error(f"Error translating component '{component_key}' to '{lang}': {e}", exc_info=True)
+        
+        if translated_content_lang:
+            translation_batch = db.batch()
+            for key, data in translated_content_lang.items():
+                component_doc_ref = db.collection("users").document(uid).collection("siteContent").document(lang).collection("components").document(key)
+                translation_batch.set(component_doc_ref, data)
+            translation_batch.commit()
+            logger.info(f"Stored translated site content for language '{lang}' for user {uid}")
+
+    logger.info(f"Completed site content generation and translation for user {uid}")

@@ -66,25 +66,26 @@ def translate_text(text: str, target_language: str) -> str:
 # 3.  AUTONOMOUS RESEARCHER AGENT  (MODIFIED) -------------------------
 researcher_agent = Agent(
     name="AutonomousResearcher",
-    model="o4-mini",
+    model="gpt-4o-mini",
     instructions=(
-        "You are an advanced web-search agent tasked with conducting in-depth research about a person.\n"
-        "Based on the provided name, title, and other details, your goal is to find multiple high-quality sources and return them as a LIST of ResearchDoc JSON objects.\n"
+        "You are an advanced web-search agent tasked with conducting in-depth research about a person using a provided list of search queries.\n"
+        "Based on the person's profile (name, title, etc.) AND the specific search queries provided to you, your goal is to execute each query, find multiple high-quality sources, and return ALL found sources as a single, flat LIST of ResearchDoc JSON objects.\n"
         "You have one primary tool at your disposal:\n"
-        "• agent_web_search(query, k): Use this to find top-k relevant URLs based on a search query. You will be prompted for how many sources (k) to find.\n\n"
+        "• agent_web_search(query, k): Use this to find top-k relevant URLs based on a search query. Aim to find 3-5 relevant sources per query unless the query is very niche.\n\n"
         "Follow these steps carefully:\n"
-        "1. Analyze the input (person's name, title, bio, social URLs, etc.) to formulate effective search queries. You might need to perform multiple searches if the initial query is too broad or too narrow.\n"
-        "2. Use the `agent_web_search()` tool to get search results. The number of results to fetch (k) will be implicitly guided by the user's request (e.g., 'find up to 50 sources').\n"
-        "3. For each relevant search result, extract its 'title', 'url', and 'snippet'.\n"
-        "4. Construct a ResearchDoc JSON object for each relevant source. For each ResearchDoc:\n"
-        "   - 'url' should be the URL from the search result.\n"
-        "   - 'title' should be the title from the search result.\n"
-        "   - 'summary' should be the snippet from the search result. If the snippet is very short, you can briefly elaborate based on the title and URL if confident, but prioritize accuracy.\n"
-        "   - 'raw_content' can be the snippet again, or a slightly more detailed summary if easily derivable from the snippet and title. Do not invent content.\n"
-        "   - 'metadata' can be an empty object or contain the source as 'search_result'.\n"
-        "5. Your FINAL output MUST BE a JSON array (list) of these ResearchDoc objects. Each object in the list must validate against the ResearchDoc schema.\n"
-        "   - Example: `[\"url\": \"example.com/person1\", \"title\": \"Person1 Info\", ...}, {\"url\": \"example.com/person2\", \"title\": \"Person2 Profile\", ...}]`\n"
-        "   - If the search returns no relevant results after thorough attempts, output an empty JSON array: `[]`.\n"
+        "1. You will be provided with a list of search queries. For EACH query in the list:\n"
+        "   a. Execute the query using the `agent_web_search()` tool.\n"
+        "   b. For each relevant search result obtained from that query, extract its 'title', 'url', and 'snippet'.\n"
+        "   c. Construct a ResearchDoc JSON object for each relevant source. For each ResearchDoc:\n"
+        "      - 'url' should be the URL from the search result.\n"
+        "      - 'title' should be the title from the search result.\n"
+        "      - 'content' should be the snippet from the search result. If the snippet is very short, you can briefly elaborate based on the title and URL if confident, but prioritize accuracy. Do not invent content.\n"
+        "      - 'source_type' (optional): If identifiable from the URL or title (e.g., 'linkedin', 'github', 'news_article', 'blog_post', 'company_website'), please populate this field. Otherwise, leave it as null.\n"
+        "      - 'metadata' can be an empty object or contain the source as 'search_result'.\n"
+        "2. Collect ALL ResearchDoc objects generated from ALL search queries into a single, flat JSON array (list).\n"
+        "3. Your FINAL output MUST BE this JSON array of ResearchDoc objects. Each object in the list must validate against the ResearchDoc schema.\n"
+        "   - Example: `[{{\"url\": \"example.com/person1\", \"title\": \"Person1 Info\", \"content\": \"...\"}}, {{\"url\": \"example.com/person2\", \"title\": \"Person2 Profile\", \"content\": \"...\"}}]`\n"
+        "   - If a specific query yields no relevant results, simply move to the next query. If ALL queries yield no relevant results after thorough attempts, output an empty JSON array: `[]`.\n"
         "   - Do not include any other text, explanations, or conversational filler in your output. Only the JSON array."
     ),
     tools=[
