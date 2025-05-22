@@ -11,6 +11,11 @@ from schemas import (
 from typing import Any, List
 from agent_tool_impl import agent_web_search, agent_fetch_url, agent_strip_html
 from schemas import ResearchDoc
+from firebase_admin import firestore
+import logging
+
+# Configure logging (ensure logger is available)
+logger = logging.getLogger(__name__)
 
 # Remove global API key initialization: openai.api_key = os.getenv("OPENAI_API_KEY", "")
 
@@ -61,31 +66,46 @@ def get_features_agent(client: openai.OpenAI) -> Agent:
 # 2.  TRANSLATOR function-tool ----------------------------------------
 @function_tool
 async def translate_text(client: openai.OpenAI, text: str, target_language: str) -> str:
-    """Translate text to target_language using an OpenAI model."""
+    if not text or not target_language:
+        logger.warning("translate_text called with empty text or target_language.")
+        return text if text else "" # Return original text or empty if original is None/empty
+
+    prompt = f"Translate the following text to {target_language}. Output ONLY the translated text, with no additional explanations, commentary, or quotation marks. If the text is a name, a brand, a number, or an email address that should not be translated, return it as is. Text to translate: \"{text}\""
+    
     try:
-        resp = await client.chat.completions.create(
-            model="gpt-3.5-turbo-0125", # Consider gpt-4o-mini for consistency/cost
+        completion = await client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a helpful translator."},
-                {"role": "user",    "content": f"Translate to {target_language}:\n{text}"},
+                {"role": "system", "content": "You are a helpful translation assistant."},
+                {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
+            temperature=0.2, # Lower temperature for more deterministic translation
         )
-        translation = resp.choices[0].message.content.strip()
-        if not translation:
-            # Fallback or error logging if translation is empty
-            print(f"Warning: Translation for '{text[:30]}...' to {target_language} resulted in empty string.")
-            return text # Return original text as a fallback
-        return translation
-    except RateLimitError as e:
-        print(f"OpenAI API rate limit exceeded during translation: {e}")
-        return f"Error: Translation failed due to rate limit. Original: {text}" # Indicate error
-    except APIStatusError as e:
-        print(f"OpenAI API status error during translation: {e}")
-        return f"Error: Translation failed due to API error. Original: {text}" # Indicate error
-    except Exception as e:
-        print(f"An unexpected error occurred during translation: {e}")
-        return f"Error: Translation failed. Original: {text}" # Indicate error
+        translated_text = completion.choices[0].message.content.strip()
+        logger.info(f"Successfully translated text to {target_language}. Original: '{text[:30]}...', Translated: '{translated_text[:30]}...'" )
+        return translated_text
+    except openai.RateLimitError as rle: # Explicitly qualify openai.RateLimitError
+        logger.error(f"OpenAI API rate limit EXCEEDED during translation to {target_language}. Error: {rle}")
+        return f"Error: Translation failed (RateLimitError). Original: {text}"
+    except openai.APIStatusError as apise: # Explicitly qualify openai.APIStatusError
+        logger.error(f"OpenAI API status error during translation to {target_language}. Error: {apise}")
+        return f"Error: Translation failed (APIStatusError). Original: {text}"
+    except Exception as e_general:
+        error_type_name = type(e_general).__name__
+        # Log with exc_info=True to get the full traceback for this unexpected catch
+        logger.error(f"Unexpected error ({error_type_name}) during translation to {target_language}. Error: {e_general}", exc_info=True)
+        
+        # Detailed debugging for RateLimitError type matching
+        if error_type_name == 'RateLimitError' or isinstance(e_general, openai.RateLimitError):
+            logger.error(f"DEBUG: General handler caught something that might be RateLimitError.")
+            logger.error(f"DEBUG: id(openai.RateLimitError) in this scope: {id(openai.RateLimitError)}")
+            logger.error(f"DEBUG: id(type(e_general)) of caught exception: {id(type(e_general))}")
+            logger.error(f"DEBUG: type(e_general) is openai.RateLimitError: {type(e_general) is openai.RateLimitError}")
+            logger.error(f"DEBUG: isinstance(e_general, openai.RateLimitError): {isinstance(e_general, openai.RateLimitError)}")
+            if type(e_general) is openai.RateLimitError or isinstance(e_general, openai.RateLimitError):
+                 logger.error("CRITICAL: openai.RateLimitError was caught by the GENERAL Exception block in translate_text. Specific handler failed.")
+                 return f"Error: Translation failed (RateLimitError caught by general handler). Original: {text}"
+        return f"Error: Translation failed (Unexpected {error_type_name}). Original: {text}"
 
 # ---------------------------------------------------------------------
 # 3.  AUTONOMOUS RESEARCHER AGENT -------------------------------------

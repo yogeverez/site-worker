@@ -176,10 +176,10 @@ async def _generate_search_queries(user_input: dict, client: openai.OpenAI, max_
         else:
             logger.error("LLM returned no content for search queries.")
             return [] # Fallback to empty list
-    except RateLimitError as e:
+    except openai.RateLimitError as e:
         logger.error(f"OpenAI API rate limit exceeded while generating search queries: {e}")
         return []
-    except APIStatusError as e:
+    except openai.APIStatusError as e:
         logger.error(f"OpenAI API status error while generating search queries: {e}")
         return []
     except Exception as e:
@@ -188,23 +188,45 @@ async def _generate_search_queries(user_input: dict, client: openai.OpenAI, max_
 
 
 async def run_agent_safely(agent: Any, prompt: str, **kwargs) -> Any:
-    """Wraps Runner.run in an async function, suitable for asyncio.run."""
-    # This function might need to be adapted if Runner.run is not inherently async
-    # If Runner.run is blocking, use asyncio.to_thread
-    # For now, assuming Runner.run can be awaited or is non-blocking enough
-    # Based on previous memory (0d3b3dbd), Runner.run() is awaitable.
+    """Runs an agent with comprehensive error handling for OpenAI API errors."""
     try:
-        return await Runner.run(agent=agent, prompt=prompt, **kwargs)
-    except RateLimitError as e:
-        logger.error(f"OpenAI API rate limit exceeded during agent run ({agent.name if hasattr(agent, 'name') else 'Unknown Agent'}): {e}")
-        return None
-    except APIStatusError as e:
-        logger.error(f"OpenAI API status error during agent run ({agent.name if hasattr(agent, 'name') else 'Unknown Agent'}): {e}")
-        return None
-    except Exception as e: # Catch other potential errors from Runner.run
-        agent_name = agent.name if hasattr(agent, 'name') else 'Unknown Agent'
-        logger.error(f"Exception in Runner.run for agent {agent_name}: {e}", exc_info=True)
-        return None
+        # Assuming Runner.run is an async function based on previous context
+        logger.info(f"Running agent '{agent.name if hasattr(agent, 'name') else 'UnknownAgent'}'...")
+        result = await Runner.run(agent=agent, prompt=prompt, **kwargs)
+        logger.info(f"Agent '{agent.name if hasattr(agent, 'name') else 'UnknownAgent'}' completed successfully.")
+        return result
+    except openai.RateLimitError as rle: # Explicitly qualify openai.RateLimitError
+        agent_name = agent.name if hasattr(agent, 'name') else 'UnknownAgent'
+        logger.error(f"OpenAI API rate limit EXCEEDED during run of agent '{agent_name}'. Error: {rle}")
+        return None # Indicate failure due to rate limit
+    except openai.APIStatusError as apise: # Explicitly qualify openai.APIStatusError
+        agent_name = agent.name if hasattr(agent, 'name') else 'UnknownAgent'
+        logger.error(f"OpenAI API status error during run of agent '{agent_name}'. Error: {apise}")
+        return None # Indicate failure due to API status error
+    except Exception as e_general:
+        agent_name = agent.name if hasattr(agent, 'name') else 'UnknownAgent'
+        error_type_name = type(e_general).__name__
+        # Log with exc_info=True to get the full traceback for this unexpected catch
+        logger.error(f"Unexpected error ({error_type_name}) during run of agent '{agent_name}'. Error: {e_general}", exc_info=True)
+        
+        # Detailed debugging for RateLimitError and APIStatusError type matching
+        if error_type_name == 'RateLimitError' or isinstance(e_general, openai.RateLimitError):
+            logger.error(f"DEBUG: General handler in run_agent_safely caught something that might be RateLimitError for agent '{agent_name}'.")
+            logger.error(f"DEBUG: id(openai.RateLimitError) in this scope: {id(openai.RateLimitError)}")
+            logger.error(f"DEBUG: id(type(e_general)) of caught exception: {id(type(e_general))}")
+            logger.error(f"DEBUG: type(e_general) is openai.RateLimitError: {type(e_general) is openai.RateLimitError}")
+            logger.error(f"DEBUG: isinstance(e_general, openai.RateLimitError): {isinstance(e_general, openai.RateLimitError)}")
+            if type(e_general) is openai.RateLimitError or isinstance(e_general, openai.RateLimitError):
+                logger.error(f"CRITICAL: openai.RateLimitError was caught by the GENERAL Exception block in run_agent_safely for agent '{agent_name}'. Specific handler failed.")
+        elif error_type_name == 'APIStatusError' or isinstance(e_general, openai.APIStatusError):
+            logger.error(f"DEBUG: General handler in run_agent_safely caught something that might be APIStatusError for agent '{agent_name}'.")
+            logger.error(f"DEBUG: id(openai.APIStatusError) in this scope: {id(openai.APIStatusError)}")
+            logger.error(f"DEBUG: id(type(e_general)) of caught exception: {id(type(e_general))}")
+            logger.error(f"DEBUG: type(e_general) is openai.APIStatusError: {type(e_general) is openai.APIStatusError}")
+            logger.error(f"DEBUG: isinstance(e_general, openai.APIStatusError): {isinstance(e_general, openai.APIStatusError)}")
+            if type(e_general) is openai.APIStatusError or isinstance(e_general, openai.APIStatusError):
+                logger.error(f"CRITICAL: openai.APIStatusError was caught by the GENERAL Exception block in run_agent_safely for agent '{agent_name}'. Specific handler failed.")
+        return None # Indicate general failure
 
 
 async def do_research(uid: str, timestamp: int | None = None):
