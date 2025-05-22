@@ -58,7 +58,8 @@ def get_site_input(uid: str) -> dict:
     """Fetch the user's input document (name, job title, social URLs) from Firestore."""
     try:
         db = get_db()
-        doc_ref = db.collection("users").document(uid).collection("siteInput").document("siteInputDocument")
+        # Fetch from the root-level siteInputDocuments collection using uid as document ID
+        doc_ref = db.collection("siteInputDocuments").document(uid)
         doc = doc_ref.get()
         return doc.to_dict() if doc.exists else {}
     except Exception as e:
