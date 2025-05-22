@@ -33,15 +33,12 @@ def run_async_in_thread(async_func):
                 loop.close()
     return wrapper
 
-# Wrap the Runner.run method to ensure it works in ThreadPoolExecutor
-async def _run_agent(agent, prompt):
-    """Async function to run an agent with a prompt."""
-    return await Runner.run(agent, prompt)
-
 # Thread-safe function to run an agent
 def run_agent_safely(agent, prompt):
     """Run an agent in a thread-safe way, handling event loop creation."""
-    return run_async_in_thread(_run_agent)(agent, prompt)
+    # Just use the built-in synchronous method which already handles the event loop
+    # This ensures we get the same return type as before
+    return Runner.run_sync(agent, prompt)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
