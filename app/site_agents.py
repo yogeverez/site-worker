@@ -7,11 +7,8 @@ from schemas import (
     HeroSection, AboutSection, FeaturesList,  # content schemas
     ResearchDoc                               # NEW – research schema
 )
-# These functions will be imported from tools.py at runtime
-# to avoid circular imports
-web_search = None
-fetch_url = None
-strip_html = None
+from typing import Any
+from agent_tool_impl import agent_web_search, agent_fetch_url, agent_strip_html
 
 openai.api_key = os.getenv("OPENAI_API_KEY", "")
 
@@ -65,44 +62,33 @@ def translate_text(text: str, target_language: str) -> str:
     return resp.choices[0].message.content.strip()
 
 # ---------------------------------------------------------------------
-# 3.  AUTONOMOUS RESEARCHER AGENT  (NEW) ------------------------------
-@function_tool
-def summarise(text: str, max_words: int = 150) -> str:
-    """Summarise text to ≤ max_words words."""
-    prompt = (
-        f"Summarize the following in no more than {max_words} words:\n{text}"
-    )
-    resp = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo-0125",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-    )
-    return resp.choices[0].message.content.strip()
-
+# 3.  AUTONOMOUS RESEARCHER AGENT  (MODIFIED) -------------------------
 researcher_agent = Agent(
     name="AutonomousResearcher",
     instructions=(
-        "You are an autonomous web-research agent.\n"
-        "Given a person's name, title and social URLs, return up to 8 JSON "
-        "objects that each follow the ResearchDoc schema. Use the tools:\n"
-        "• search(query,k) – get top-k URLs\n"
-        "• fetch(url)      – raw HTML\n"
-        "• strip_html(html)– plaintext\n"
-        "• summarise(text) – concise summary\n\n"
-        "Steps:\n"
-        "1. Use search() to find relevant URLs.\n"
-        "2. fetch() and strip_html() each page.\n"
-        "3. summarise() the content.\n"
-        "4. Build ResearchDoc objects.\n"
-        "5. Output ONLY a JSON array that validates against List[ResearchDoc]."
+        "You are a simple web-search agent tasked with finding information about a person.\n"
+        "Based on the provided name, title, and social URLs, your goal is to return a SINGLE ResearchDoc JSON object based on the TOP search result.\n"
+        "You have ONLY ONE tool at your disposal:\n"
+        "• agent_web_search(query, k): Use this to find top-k relevant URLs based on a search query.\n\n"
+        "Follow these steps carefully:\n"
+        "1. Analyze the input (person's name, title, social URLs) to formulate an effective search query.\n"
+        "2. Use the `agent_web_search()` tool to get search results (e.g., k=3).\n"
+        "3. Take the VERY FIRST search result. Use its 'title', 'url', and 'snippet'.\n"
+        "4. Construct a SINGLE ResearchDoc JSON object. For this ResearchDoc:\n"
+        "   - 'url' should be the URL from the search result.\n"
+        "   - 'title' should be the title from the search result.\n"
+        "   - 'summary' should be the snippet from the search result.\n"
+        "   - 'raw_content' can be the snippet again, or an empty string.\n"
+        "   - 'metadata' can be an empty object or contain the source as 'search_result'.\n"
+        "5. Your FINAL output MUST BE ONLY this single JSON object. It must validate against the ResearchDoc schema.\n"
+        "   - Example: `{\"url\": \"example.com/person\", \"title\": \"Person Name - Info\", \"summary\": \"This is a snippet about the person...\", \"raw_content\": \"This is a snippet about the person...\", \"metadata\": {\"source\": \"search_result\"}}`\n"
+        "   - If the search returns no results, output an empty JSON object: `{}`.\n"
+        "   - Do not include any other text, explanations, or conversational filler in your output. Only the single JSON object."
     ),
-    tools={
-        "search": web_search,
-        "fetch": fetch_url,
-        "strip_html": strip_html,
-        "summarise": summarise,
-    },
-    output_type=list[ResearchDoc],
+    tools=[
+        agent_web_search,
+    ],
+    output_type=ResearchDoc,
 )
 
 # ---------------------------------------------------------------------

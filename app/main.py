@@ -1,17 +1,14 @@
 import os, base64, json, time
 import logging
+import asyncio
 from flask import Flask, request
 
 # Import helper modules and OpenAI Agents setup
 from openai import OpenAI
 
-# Import tools module (works in both local and Cloud Run environments)
-try:
-    # Try relative import first (for when running as a package)
-    from .tools import do_research, generate_site_content
-except ImportError:
-    # Fall back to absolute import (for when running directly)
-    from tools import do_research, generate_site_content
+# Import tools module
+# In the Docker container, all app/*.py files are in the /app directory, so direct import works.
+from tools import do_research, generate_site_content
 
 # Configure logging
 logging.basicConfig(
@@ -61,7 +58,28 @@ def pubsub_handler():
 
         logger.info(f"Job parameters - UID: {uid}, Mode: {mode}, Languages: {languages}")
 
-        if not uid or not mode or not languages:
+        # Detailed boolean checks for debugging
+        check_not_uid = not uid
+        check_not_mode = not mode
+        check_not_languages = not languages
+        # Ensure mode and languages are treated as potentially None before boolean negation for clarity in logs
+        actual_mode_for_check = mode if mode is not None else ''
+        actual_languages_for_check = languages if languages is not None else []
+        
+        check_not_actual_mode = not actual_mode_for_check
+        check_not_actual_languages = not actual_languages_for_check
+
+        check_inner_condition = (check_not_actual_mode and check_not_actual_languages)
+        check_full_condition = check_not_uid or check_inner_condition
+
+        logger.info(f"DEBUG: uid='{uid}', mode='{mode}', languages={languages}")
+        logger.info(f"DEBUG: not uid -> {check_not_uid}")
+        logger.info(f"DEBUG: mode for check='{actual_mode_for_check}', not mode -> {check_not_actual_mode}")
+        logger.info(f"DEBUG: languages for check={actual_languages_for_check}, not languages -> {check_not_actual_languages}")
+        logger.info(f"DEBUG: (not mode AND not languages) -> {check_inner_condition}")
+        logger.info(f"DEBUG: FINAL_CONDITION (not uid OR (not mode AND not languages)) -> {check_full_condition}")
+
+        if check_full_condition:
             logger.warning(f"Missing required parameters - UID: {uid}, Mode: {mode}, Languages: {languages}")
             return ("Bad Request: missing uid/mode/languages", 400)
 
@@ -69,13 +87,13 @@ def pubsub_handler():
         if mode in ("research", "full"):
             # Perform web research and store results in Firestore
             logger.info(f"Starting research mode for user {uid}")
-            do_research(uid, timestamp=timestamp)
+            asyncio.run(do_research(uid, timestamp=timestamp))
             logger.info(f"Completed research mode for user {uid}")
             
         if mode in ("generate", "full"):
             # Generate site content (and translations) using research data
             logger.info(f"Starting content generation for user {uid} in languages: {languages}")
-            generate_site_content(uid, languages, timestamp=timestamp)
+            asyncio.run(generate_site_content(uid, languages, timestamp=timestamp))
             logger.info(f"Completed content generation for user {uid}")
 
         elapsed_time = time.time() - start_time

@@ -9,28 +9,25 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 from google.cloud import firestore
+from pydantic import TypeAdapter, ValidationError
+from json import JSONDecodeError
 # Import local agents module components
 from site_agents import hero_agent, about_agent, features_agent, translate_text, researcher_agent, ResearchDoc
 from agents import Runner
 from schemas import HeroSection, AboutSection, FeaturesList
+from search_utils import search_web
 
 # Thread-safe function to run an agent
-def run_agent_safely(agent, prompt):
-    """Run an agent in a thread-safe way, handling event loop creation."""
-    # Check if we're in the main thread
-    if threading.current_thread().name == 'MainThread':
-        # In main thread, we can use Runner.run_sync directly
-        return Runner.run_sync(agent, prompt)
-    else:
-        # In worker thread, we need to create a new event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            # Use the synchronous method with our event loop
-            return Runner.run_sync(agent, prompt)
-        finally:
-            # Clean up the event loop
-            loop.close()
+async def run_agent_safely(agent, prompt):
+    """Run an agent asynchronously using Runner.run()."""
+    current_thread = threading.current_thread()
+    logger.info(f"Calling Runner.run for agent {agent.name} in thread: {current_thread.name} with prompt: {prompt[:100]}...")
+    try:
+        # Use the asynchronous Runner.run()
+        return await Runner.run(agent, prompt)
+    except Exception as e:
+        logger.error(f"Exception in Runner.run for agent {agent.name} in thread {current_thread.name}: {e}", exc_info=True)
+        raise
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -88,122 +85,10 @@ def get_site_input(uid: str) -> dict:
         logger.error(f"Error getting site input for user {uid}: {e}")
         return {}
 
-def search_web(query: str, num_results: int = 5) -> list[dict]:
-    """Use SerpAPI to search the web and return a list of result dicts (title, link, snippet)."""
-    if not SERPAPI_API_KEY:
-        logger.warning("SerpAPI key not configured, returning empty results")
-        return []
-    
-    params = {
-        "engine": "google", 
-        "q": query, 
-        "api_key": SERPAPI_API_KEY,
-        "num": num_results
-    }
-    
-    # Add retry logic for SerpAPI calls
-    max_retries = 3
-    retry_count = 0
-    results = []
-    
-    while retry_count < max_retries:
-        try:
-            logger.info(f"Searching web for '{query}' (attempt {retry_count + 1}/{max_retries})")
-            resp = requests.get(
-                "https://serpapi.com/search", 
-                params=params, 
-                timeout=15  # 15 second timeout
-            )
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                for res in data.get("organic_results", []):
-                    link = res.get("link")
-                    title = res.get("title")
-                    snippet = res.get("snippet")
-                    if link and title:
-                        results.append({"title": title, "url": link, "snippet": snippet})
-                
-                logger.info(f"Found {len(results)} search results for '{query}'")
-                break  # Success, exit retry loop
-            else:
-                logger.warning(f"SerpAPI returned status code {resp.status_code}")
-                retry_count += 1
-                if retry_count < max_retries:
-                    time.sleep(1)  # Wait before retrying
-        
-        except Exception as e:
-            logger.error(f"Error searching web: {e}")
-            retry_count += 1
-            if retry_count < max_retries:
-                time.sleep(1)  # Wait before retrying
-            else:
-                logger.error(f"Failed to search web after {max_retries} attempts")
-    
-    return results
-
-# Helper functions for the researcher_agent
-def web_search(query: str, num_results: int = 5) -> List[Dict[str, str]]:
-    """Search the web using SerpAPI and return a list of result dicts."""
-    return search_web(query, num_results)
-
-def fetch_url(url: str) -> str:
-    """Fetch the raw HTML content from a URL."""
-    # Add retry logic for fetching page content
-    max_retries = 2  # Fewer retries for page content to avoid long delays
-    retry_count = 0
-    
-    while retry_count < max_retries:
-        try:
-            logger.info(f"Fetching content from {url} (attempt {retry_count + 1}/{max_retries})")
-            resp = requests.get(
-                url, 
-                timeout=10,  # Shorter timeout for page fetching
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml",
-                    "Accept-Language": "en-US,en;q=0.9"
-                }
-            )
-            
-            if resp.status_code == 200 and resp.text:
-                logger.info(f"Successfully fetched content from {url}")
-                return resp.text
-            else:
-                logger.warning(f"Failed to fetch content from {url}: HTTP {resp.status_code}")
-                retry_count += 1
-                if retry_count < max_retries:
-                    time.sleep(1)  # Wait before retrying
-        except Exception as e:
-            logger.error(f"Error fetching content from {url}: {e}")
-            retry_count += 1
-            if retry_count < max_retries:
-                time.sleep(1)  # Wait before retrying
-            else:
-                logger.error(f"Failed to fetch content after {max_retries} attempts")
-    
-    return ""
-
-def strip_html(html: str) -> str:
-    """Convert HTML to plain text."""
-    if not html:
-        return ""
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        # Remove script and style tags
-        for tag in soup(["script", "style", "noscript"]):
-            tag.extract()
-        text = soup.get_text(separator=" ")
-        # Collapse whitespace
-        return re.sub(r"\s+\s+", " ", text).strip()
-    except Exception as e:
-        logger.error(f"Error stripping HTML: {e}")
-        return ""
-
 # Keep the original fetch_page_content function for backward compatibility
 def fetch_page_content(url: str) -> tuple[str, str]:
     """Fetch the page at url and return (title, plaintext_content)."""
-    html = fetch_url(url)
+    html = requests.get(url, timeout=10).text
     if not html:
         return ("", "")
     
@@ -212,10 +97,15 @@ def fetch_page_content(url: str) -> tuple[str, str]:
     # Get page title
     title = soup.title.string.strip() if soup.title and soup.title.string else url
     # Get content using strip_html
-    content = strip_html(html)
+    content = ""
+    for tag in soup(["script", "style", "noscript"]):
+        tag.extract()
+    text = soup.get_text(separator=" ")
+    # Collapse whitespace
+    content = re.sub(r"\s+\s+", " ", text).strip()
     return (title, content)
 
-def do_research(uid: str, timestamp: int | None = None):
+async def do_research(uid: str, timestamp: int | None = None):
     """
     Perform research using either:
       • researcher_agent  (RESEARCH_MODE=agent  – default)
@@ -240,19 +130,50 @@ def do_research(uid: str, timestamp: int | None = None):
 
         # -------- researcher_agent path ----------
         logger.info("[research] Using agent-based research mode")
+        
+        # Extract more details from user_input for a richer prompt
         name = user_input.get("name", "")
-        title = user_input.get("title") or user_input.get("job_title", "")
-        socials = user_input.get("socialUrls", {})
-        social_lines = (
-            "\n".join(str(v) for v in socials.values())
-            if isinstance(socials, dict) else ""
-        )
+        title = user_input.get("title") or user_input.get("job_title", "") # Existing logic for title
+        location = user_input.get("location", "")
+        bio = user_input.get("bio", "")
+        professional_background = user_input.get("professionalBackground", "")
+        website_goal = user_input.get("websiteGoal", "")
+        template = user_input.get("template", "") # e.g., "PersonalBranding"
 
-        prompt = (
-            f"Name: {name}\nTitle: {title}\nSocials:\n{social_lines}\n\n"
-            "Find up to 8 high-quality sources about this person and "
-            "return them as a JSON array of ResearchDoc objects."
+        socials = user_input.get("socialUrls", {}) # Existing key for social links
+        social_lines_list = []
+        if isinstance(socials, dict):
+            for platform, url in socials.items():
+                if url and str(url).strip(): # Ensure URL is not empty or just whitespace
+                    social_lines_list.append(f"- {platform.capitalize()}: {str(url).strip()}")
+        social_info = "\n".join(social_lines_list) if social_lines_list else "N/A"
+
+        prompt_parts = [
+            f"Name: {name}",
+            f"Title: {title}",
+        ]
+        if location:
+            prompt_parts.append(f"Location: {location}")
+        if bio:
+            # For potentially long fields, consider sending only a summary or first N chars if it causes issues.
+            # For now, sending full content.
+            prompt_parts.append(f"Bio: {bio}") 
+        if professional_background:
+            prompt_parts.append(f"Professional Background: {professional_background}")
+        if website_goal:
+            prompt_parts.append(f"Stated Website Goal: {website_goal}")
+        if template:
+            prompt_parts.append(f"Site Template Type: {template}")
+
+        prompt_parts.append(f"Social Links:\n{social_info}")
+        
+        # Updated instruction for the agent
+        prompt_parts.append(
+            "\nBased on all the information above, find up to 8 high-quality sources about this person. "
+            "Focus on information relevant to their professional persona, achievements, and public presence. "
+            "Return the findings as a JSON array of ResearchDoc objects."
         )
+        prompt = "\n\n".join(prompt_parts) # Use double newline for better section separation in the prompt
 
         # Call the agent (blocking)
         try:
@@ -263,20 +184,52 @@ def do_research(uid: str, timestamp: int | None = None):
             logger.info(f"Running researcher_agent in thread: {current_thread.name}")
             
             # Use our thread-safe runner function
-            result = run_agent_safely(researcher_agent, prompt)
-                
-            docs: List[ResearchDoc] = result.final_output  # already schema-validated
-            logger.info(f"Researcher agent found {len(docs)} sources for {uid}")
+            agent_output_obj = await run_agent_safely(researcher_agent, prompt)
+            raw_agent_output = agent_output_obj.final_output # This should be ResearchDoc or None
 
-            # Write each ResearchDoc to Firestore using research/{uid}/sources structure
+            final_research_output: List[Dict[str, Any]] = []
+            parsed_docs: List[ResearchDoc] = [] # Will hold at most one doc
+
+            if isinstance(raw_agent_output, ResearchDoc):
+                # If the agent successfully returns a ResearchDoc object
+                parsed_docs.append(raw_agent_output)
+                logger.info(f"Successfully received ResearchDoc object from agent for user {uid}.")
+            elif raw_agent_output is None:
+                logger.info(f"Researcher agent for user {uid} returned None as final_output.")
+            else:
+                # If it's not a ResearchDoc and not None, it's an unexpected type or an error indicator from the SDK
+                logger.warning(f"Researcher agent for user {uid} returned unexpected type: {type(raw_agent_output)}. Content: {str(raw_agent_output)[:500]}. Expected ResearchDoc or None.")
+                # Consider if this case should attempt to parse raw_agent_output if it's a string/dict, or just log.
+                # For now, strict expectation: SDK should provide ResearchDoc or None.
+
+            # Convert List[ResearchDoc] (max 1 item) to List[Dict[str, Any]] for Firestore
+            if parsed_docs:
+                for doc in parsed_docs: # Loop will run at most once
+                    if isinstance(doc, ResearchDoc):
+                        final_research_output.append(doc.model_dump())
+                    else:
+                        logger.warning(f"Encountered non-ResearchDoc item in parsed_docs: {type(doc)}. Skipping.") # Should not happen
+            else:
+                logger.warning(f"No ResearchDoc was successfully obtained for user {uid} from agent output.")
+
+            # Store research results in Firestore
             db = get_db()
-            sources_collection = db.collection("research").document(uid).collection("sources")
-            for idx, doc in enumerate(docs, 1):
-                doc_id = f"src{idx:02d}"
-                sources_collection.document(doc_id).set(
-                    doc.model_dump() | {"timestamp": timestamp or int(time.time())}
-                )
-                logger.info(f"Saved research doc {doc_id} for {uid}")
+            if db:
+                user_research_col = db.collection(f"users/{uid}/research")
+                # Delete existing research documents before adding new ones
+                for old_doc in user_research_col.stream():
+                    old_doc.reference.delete()
+                
+                for i, doc_data in enumerate(final_research_output):
+                    if isinstance(doc_data, dict):
+                        doc_ref = user_research_col.document(f"doc_{i}")
+                        doc_ref.set(doc_data)
+                        logger.info(f"Stored research document doc_{i} for user {uid}")
+                    else:
+                        logger.error(f"Attempted to store non-dict item as research document for user {uid}: {type(doc_data)}")
+            else:
+                logger.error(f"Firestore client not available. Cannot store research for user {uid}.")
+
         except Exception as e:
             logger.error(f"Error with researcher_agent for {uid}: {e}")
             # Fall back to legacy research if agent fails
@@ -359,13 +312,7 @@ def _legacy_research(uid: str, user_input: dict, timestamp: int | None = None):
         # Return gracefully instead of crashing the worker
         return
 
-# Initialize the site_agents module functions to avoid circular imports
-import site_agents
-site_agents.web_search = web_search
-site_agents.fetch_url = fetch_url
-site_agents.strip_html = strip_html
-
-def generate_site_content(uid: str, languages: list[str], timestamp: int = None):
+async def generate_site_content(uid: str, languages: list[str], timestamp: int = None):
     """Generate website components from research docs and store them (supports multiple languages)."""
     try:
         logger.info(f"Starting content generation for user {uid} in languages: {languages}")
@@ -406,15 +353,15 @@ def generate_site_content(uid: str, languages: list[str], timestamp: int = None)
         
         # Run each agent to get structured content using our thread-safe runner function
         logger.info(f"Running hero agent for user {uid}")
-        hero_result = run_agent_safely(hero_agent, user_prompt)
+        hero_result = await run_agent_safely(hero_agent, user_prompt)
         hero_data = hero_result.final_output  # HeroSection model instance
         
         logger.info(f"Running about agent for user {uid}")
-        about_result = run_agent_safely(about_agent, user_prompt)
+        about_result = await run_agent_safely(about_agent, user_prompt)
         about_data = about_result.final_output  # AboutSection model
         
         logger.info(f"Running features agent for user {uid}")
-        features_result = run_agent_safely(features_agent, user_prompt)
+        features_result = await run_agent_safely(features_agent, user_prompt)
         features_data = features_result.final_output  # FeaturesList model
 
         # Convert Pydantic model instances to dict for storing
