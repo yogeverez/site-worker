@@ -14,31 +14,23 @@ from site_agents import hero_agent, about_agent, features_agent, translate_text,
 from agents import Runner
 from schemas import HeroSection, AboutSection, FeaturesList
 
-# Configure thread-safe event loop handling
-def run_async_in_thread(async_func):
-    """Run an async function in a thread-safe way, handling event loop creation."""
-    @functools.wraps(async_func)
-    def wrapper(*args, **kwargs):
-        # Check if we're in the main thread
-        if threading.current_thread().name == 'MainThread':
-            # In main thread, we can use asyncio.run directly
-            return asyncio.run(async_func(*args, **kwargs))
-        else:
-            # In worker thread, we need to create a new event loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(async_func(*args, **kwargs))
-            finally:
-                loop.close()
-    return wrapper
-
 # Thread-safe function to run an agent
 def run_agent_safely(agent, prompt):
     """Run an agent in a thread-safe way, handling event loop creation."""
-    # Just use the built-in synchronous method which already handles the event loop
-    # This ensures we get the same return type as before
-    return Runner.run_sync(agent, prompt)
+    # Check if we're in the main thread
+    if threading.current_thread().name == 'MainThread':
+        # In main thread, we can use Runner.run_sync directly
+        return Runner.run_sync(agent, prompt)
+    else:
+        # In worker thread, we need to create a new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            # Use the synchronous method with our event loop
+            return Runner.run_sync(agent, prompt)
+        finally:
+            # Clean up the event loop
+            loop.close()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
