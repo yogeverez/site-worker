@@ -230,7 +230,7 @@ async def do_research(uid: str, timestamp: int | None = None):
                 # Delete existing research documents before adding new ones
                 for old_doc in user_research_col.stream():
                     old_doc.reference.delete()
-                logger.info(f"Cleared existing research documents for {uid} in {user_research_col.path}")
+                logger.info(f"Cleared existing research documents for {uid} in collection research/{uid}/sources")
                 
                 # Use the parsed_docs (list of ResearchDoc objects)
                 for i, doc_content in enumerate(parsed_docs):
