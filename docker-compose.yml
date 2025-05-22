@@ -1,0 +1,46 @@
+version: '3'
+
+services:
+  site-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - OPENAI_API_KEY=test_key
+      - SERPAPI_KEY=test_key
+      # Add any other environment variables needed for testing
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    volumes:
+      # Mount a mock credentials file for local testing
+      - ./mock_credentials.json:/tmp/credentials.json
+    command: >
+      sh -c "
+        echo 'Starting site-worker service...' &&
+        gunicorn -b 0.0.0.0:8080 --workers=1 --threads=8 --timeout=120 main:app
+      "
+
+  # Optional: Add a test runner service
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - site-worker
+    environment:
+      - TEST_SERVICE_URL=http://site-worker:8080
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "
+        echo 'Waiting for site-worker to be ready...' &&
+        sleep 10 &&
+        python /app/test_pubsub_docker.py --url $$TEST_SERVICE_URL
+      "

@@ -14,9 +14,9 @@ RUN apt-get update && \
 # Update pip and install security packages
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Copy requirements and install with optimizations
+# Copy requirements and install with all dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir --no-deps -r requirements.txt && \
+RUN pip install --no-cache-dir -r requirements.txt && \
     # Remove pip cache and temporary files to reduce image size
     rm -rf /root/.cache/pip/* && \
     # Set proper permissions for application files

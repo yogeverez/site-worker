@@ -56,6 +56,9 @@ def main():
     test_import("agents")
     test_import("pydantic")
     test_import("pydantic_core")
+    test_import("typing_extensions")
+    test_import("typing_inspect")
+    test_import("typing_inspection")
     
     # Web scraping
     test_import("requests")
