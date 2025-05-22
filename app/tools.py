@@ -12,22 +12,41 @@ from schemas import HeroSection, AboutSection, FeaturesList
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Lazy initialization of Firestore client
+# Lazy initialization of Firestore client with retry logic
 _db = None
 
 def get_db():
-    """Lazily initialize and return the Firestore client."""
     global _db
     if _db is None:
-        try:
-            logger.info("Initializing Firestore client")
-            _db = firestore.Client()
-            logger.info("Firestore client initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing Firestore client: {e}")
-            # Return a dummy client for testing/development
-            from unittest.mock import MagicMock
-            _db = MagicMock()
+        # Add retry logic for Firestore initialization
+        retry_count = 0
+        max_retries = 3
+        last_error = None
+        
+        while retry_count < max_retries:
+            try:
+                logger.info(f"Initializing Firestore client (attempt {retry_count + 1}/{max_retries})")
+                _db = firestore.Client()
+                logger.info("Firestore client initialized successfully")
+                break
+            except Exception as e:
+                retry_count += 1
+                last_error = e
+                logger.warning(f"Failed to initialize Firestore client (attempt {retry_count}/{max_retries}): {e}")
+                if retry_count < max_retries:
+                    time.sleep(1)  # Wait before retrying
+        
+        if _db is None:
+            logger.error(f"Failed to initialize Firestore client after {max_retries} attempts: {last_error}")
+            
+            # Check if we're in a development environment
+            if os.getenv("ENVIRONMENT") == "development" or os.getenv("FLASK_ENV") == "development":
+                logger.warning("Using mock Firestore client for development environment")
+                from unittest.mock import MagicMock
+                _db = MagicMock()
+            else:
+                # In production, we should fail fast
+                raise RuntimeError(f"Failed to initialize Firestore client: {last_error}")
     return _db
 
 # SerpAPI configuration
@@ -47,37 +66,105 @@ def get_site_input(uid: str) -> dict:
 def search_web(query: str, num_results: int = 5) -> list[dict]:
     """Use SerpAPI to search the web and return a list of result dicts (title, link, snippet)."""
     if not SERPAPI_API_KEY:
+        logger.warning("SerpAPI key not configured, returning empty results")
         return []
+    
     params = {
         "engine": "google", 
         "q": query, 
         "api_key": SERPAPI_API_KEY,
         "num": num_results
     }
-    resp = requests.get("https://serpapi.com/search", params=params, timeout=15)
+    
+    # Add retry logic for SerpAPI calls
+    max_retries = 3
+    retry_count = 0
     results = []
-    if resp.status_code == 200:
-        data = resp.json()
-        for res in data.get("organic_results", []):
-            link = res.get("link")
-            title = res.get("title")
-            snippet = res.get("snippet")
-            if link and title:
-                results.append({"title": title, "url": link, "snippet": snippet})
+    
+    while retry_count < max_retries:
+        try:
+            logger.info(f"Searching web for '{query}' (attempt {retry_count + 1}/{max_retries})")
+            resp = requests.get(
+                "https://serpapi.com/search", 
+                params=params, 
+                timeout=15  # 15 second timeout
+            )
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                for res in data.get("organic_results", []):
+                    link = res.get("link")
+                    title = res.get("title")
+                    snippet = res.get("snippet")
+                    if link and title:
+                        results.append({"title": title, "url": link, "snippet": snippet})
+                
+                logger.info(f"Found {len(results)} search results for '{query}'")
+                break  # Success, exit retry loop
+            else:
+                logger.warning(f"SerpAPI returned status code {resp.status_code}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(1)  # Wait before retrying
+        
+        except Exception as e:
+            logger.error(f"Error searching web: {e}")
+            retry_count += 1
+            if retry_count < max_retries:
+                time.sleep(1)  # Wait before retrying
+            else:
+                logger.error(f"Failed to search web after {max_retries} attempts")
+    
     return results
 
 def fetch_page_content(url: str) -> tuple[str, str]:
     """Fetch the page at url and return (title, plaintext_content)."""
-    try:
-        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-    except Exception as e:
+    # Add retry logic for fetching page content
+    max_retries = 2  # Fewer retries for page content to avoid long delays
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            logger.info(f"Fetching content from {url} (attempt {retry_count + 1}/{max_retries})")
+            resp = requests.get(
+                url, 
+                timeout=10,  # Shorter timeout for page fetching
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml",
+                    "Accept-Language": "en-US,en;q=0.9"
+                }
+            )
+            
+            if resp.status_code == 200 and resp.text:
+                # Parse HTML content
+                soup = BeautifulSoup(resp.text, "html.parser")
+                # Get page title
+                title = soup.title.string.strip() if soup.title else url
+                logger.info(f"Successfully fetched content from {url}")
+                break  # Success, exit retry loop
+            else:
+                logger.warning(f"Failed to fetch content from {url}: HTTP {resp.status_code}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(1)  # Wait before retrying
+        except Exception as e:
+            logger.error(f"Error fetching content from {url}: {e}")
+            retry_count += 1
+            if retry_count < max_retries:
+                time.sleep(1)  # Wait before retrying
+            else:
+                logger.error(f"Failed to fetch content after {max_retries} attempts")
+                return ("", "")
+    
+    # If we got here without returning, we have a valid response
+    if not hasattr(resp, 'text') or not resp.text:
         return ("", "")
-    if resp.status_code != 200 or not resp.text:
-        return ("", "")
+        
     # Parse HTML content
     soup = BeautifulSoup(resp.text, "html.parser")
     # Get page title
-    title = soup.title.string.strip() if soup.title else url
+    title = soup.title.string.strip() if soup.title and soup.title.string else url
     # Remove script and style tags
     for tag in soup(["script", "style", "noscript"]):
         tag.extract()
