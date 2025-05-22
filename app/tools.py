@@ -1,7 +1,9 @@
 import os, requests, re
 from bs4 import BeautifulSoup
 from google.cloud import firestore
-from agents import Runner, hero_agent, about_agent, features_agent, translate_text
+# Import local agents module components
+from site_agents import hero_agent, about_agent, features_agent, translate_text
+from agents import Runner
 from schemas import HeroSection, AboutSection, FeaturesList
 
 # Initialize Firestore client (project inferred from environment or ADC)

@@ -2,11 +2,11 @@ import os, base64, json
 from flask import Flask, request
 
 # Import helper modules and OpenAI Agents setup
-import openai
+from openai import OpenAI
 from tools import do_research, generate_site_content
 
-# Configure OpenAI API key from environment
-openai.api_key = os.getenv("OPENAI_API_KEY", "")
+# OpenAI client will be initialized in each function that needs it
+# using the API key from environment
 
 app = Flask(__name__)
 

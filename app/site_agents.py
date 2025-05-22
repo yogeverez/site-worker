@@ -47,11 +47,13 @@ features_agent = Agent(
 @function_tool
 def translate_text(text: str, target_language: str) -> str:
     """Translate the given text into the target language while preserving meaning."""
-    import openai
+    from openai import OpenAI
+    import os
     # Use a smaller model for translation for efficiency
     translate_prompt = f"Translate the following text to {target_language}:\n```{text}```"
     try:
-        resp = openai.ChatCompletion.create(
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo-0613",
             messages=[
                 {"role": "system", "content": "You are a translation assistant."},
@@ -59,7 +61,7 @@ def translate_text(text: str, target_language: str) -> str:
             ],
             temperature=0.3
         )
-        translated = resp["choices"][0]["message"]["content"].strip()
+        translated = response.choices[0].message.content.strip()
         return translated
     except Exception as e:
         # If translation fails, return original text as fallback
