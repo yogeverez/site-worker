@@ -52,8 +52,8 @@ if __name__ == '__main__':
     os.environ['OPENAI_API_KEY'] = 'test_key'
     os.environ['SERPAPI_KEY'] = 'test_key'
     
-    # Get port from environment variable with a default of 8099 (to avoid conflicts)
-    port = int(os.environ.get('PORT', '8099'))
+    # Get port from environment variable with a default of 8100 (to avoid conflicts)
+    port = int(os.environ.get('PORT', '8100'))
     print(f"Starting Flask app on port {port}")
     print(f"Health check endpoint: http://localhost:{port}/health")
     app.run(host='0.0.0.0', port=port)
