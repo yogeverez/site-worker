@@ -169,7 +169,7 @@ async def do_research(uid: str, timestamp: int | None = None):
         
         # Updated instruction for the agent
         prompt_parts.append(
-            "\nBased on all the information above, find up to 8 high-quality sources about this person. "
+            "\nBased on all the information above, find up to 50 high-quality sources about this person. "
             "Focus on information relevant to their professional persona, achievements, and public presence. "
             "Return the findings as a JSON array of ResearchDoc objects."
         )
@@ -227,10 +227,6 @@ async def do_research(uid: str, timestamp: int | None = None):
             db = get_db()
             if db:
                 user_research_col = db.collection(f"research/{uid}/sources")
-                # Delete existing research documents before adding new ones
-                for old_doc in user_research_col.stream():
-                    old_doc.reference.delete()
-                logger.info(f"Cleared existing research documents for {uid} in collection research/{uid}/sources")
                 
                 # Use the parsed_docs (list of ResearchDoc objects)
                 for i, doc_content in enumerate(parsed_docs):

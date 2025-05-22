@@ -7,8 +7,9 @@ from schemas import (
     HeroSection, AboutSection, FeaturesList,  # content schemas
     ResearchDoc                               # NEW – research schema
 )
-from typing import Any
+from typing import Any, List
 from agent_tool_impl import agent_web_search, agent_fetch_url, agent_strip_html
+from schemas import ResearchDoc
 
 openai.api_key = os.getenv("OPENAI_API_KEY", "")
 
@@ -65,30 +66,31 @@ def translate_text(text: str, target_language: str) -> str:
 # 3.  AUTONOMOUS RESEARCHER AGENT  (MODIFIED) -------------------------
 researcher_agent = Agent(
     name="AutonomousResearcher",
+    model="o4-mini",
     instructions=(
-        "You are a simple web-search agent tasked with finding information about a person.\n"
-        "Based on the provided name, title, and social URLs, your goal is to return a SINGLE ResearchDoc JSON object based on the TOP search result.\n"
-        "You have ONLY ONE tool at your disposal:\n"
-        "• agent_web_search(query, k): Use this to find top-k relevant URLs based on a search query.\n\n"
+        "You are an advanced web-search agent tasked with conducting in-depth research about a person.\n"
+        "Based on the provided name, title, and other details, your goal is to find multiple high-quality sources and return them as a LIST of ResearchDoc JSON objects.\n"
+        "You have one primary tool at your disposal:\n"
+        "• agent_web_search(query, k): Use this to find top-k relevant URLs based on a search query. You will be prompted for how many sources (k) to find.\n\n"
         "Follow these steps carefully:\n"
-        "1. Analyze the input (person's name, title, social URLs) to formulate an effective search query.\n"
-        "2. Use the `agent_web_search()` tool to get search results (e.g., k=3).\n"
-        "3. Take the VERY FIRST search result. Use its 'title', 'url', and 'snippet'.\n"
-        "4. Construct a SINGLE ResearchDoc JSON object. For this ResearchDoc:\n"
+        "1. Analyze the input (person's name, title, bio, social URLs, etc.) to formulate effective search queries. You might need to perform multiple searches if the initial query is too broad or too narrow.\n"
+        "2. Use the `agent_web_search()` tool to get search results. The number of results to fetch (k) will be implicitly guided by the user's request (e.g., 'find up to 50 sources').\n"
+        "3. For each relevant search result, extract its 'title', 'url', and 'snippet'.\n"
+        "4. Construct a ResearchDoc JSON object for each relevant source. For each ResearchDoc:\n"
         "   - 'url' should be the URL from the search result.\n"
         "   - 'title' should be the title from the search result.\n"
-        "   - 'summary' should be the snippet from the search result.\n"
-        "   - 'raw_content' can be the snippet again, or an empty string.\n"
+        "   - 'summary' should be the snippet from the search result. If the snippet is very short, you can briefly elaborate based on the title and URL if confident, but prioritize accuracy.\n"
+        "   - 'raw_content' can be the snippet again, or a slightly more detailed summary if easily derivable from the snippet and title. Do not invent content.\n"
         "   - 'metadata' can be an empty object or contain the source as 'search_result'.\n"
-        "5. Your FINAL output MUST BE ONLY this single JSON object. It must validate against the ResearchDoc schema.\n"
-        "   - Example: `{\"url\": \"example.com/person\", \"title\": \"Person Name - Info\", \"summary\": \"This is a snippet about the person...\", \"raw_content\": \"This is a snippet about the person...\", \"metadata\": {\"source\": \"search_result\"}}`\n"
-        "   - If the search returns no results, output an empty JSON object: `{}`.\n"
-        "   - Do not include any other text, explanations, or conversational filler in your output. Only the single JSON object."
+        "5. Your FINAL output MUST BE a JSON array (list) of these ResearchDoc objects. Each object in the list must validate against the ResearchDoc schema.\n"
+        "   - Example: `[\"url\": \"example.com/person1\", \"title\": \"Person1 Info\", ...}, {\"url\": \"example.com/person2\", \"title\": \"Person2 Profile\", ...}]`\n"
+        "   - If the search returns no relevant results after thorough attempts, output an empty JSON array: `[]`.\n"
+        "   - Do not include any other text, explanations, or conversational filler in your output. Only the JSON array."
     ),
     tools=[
         agent_web_search,
     ],
-    output_type=ResearchDoc,
+    output_type=List[ResearchDoc],
 )
 
 # ---------------------------------------------------------------------
