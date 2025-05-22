@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------
 # 1.  CONTENT AGENTS --------------------------------------------------
-def get_hero_agent(client: openai.OpenAI) -> Agent:
+def get_hero_agent() -> Agent:
     hero_instructions = (
         "You are a copywriter for personal websites. Use the user's information to create a JSON for the hero section. "
         "The hero JSON should include the person's name as a bold headline and a one-sentence tagline highlighting their role or uniqueness. "
@@ -32,10 +32,10 @@ def get_hero_agent(client: openai.OpenAI) -> Agent:
         instructions=hero_instructions,
         model="gpt-4o-mini",
         output_type=HeroSection,
-        llm=client # Pass the configured client
+        model_settings={"max_retries": 0} # Pass model_settings instead of llm client
     )
 
-def get_about_agent(client: openai.OpenAI) -> Agent:
+def get_about_agent() -> Agent:
     about_instructions = (
         "You write an 'About Me' section for a personal site in third person. Summarize the user's background, skills, and interests in a single paragraph. "
         "Output only valid JSON for the AboutSection model."
@@ -45,10 +45,10 @@ def get_about_agent(client: openai.OpenAI) -> Agent:
         instructions=about_instructions,
         model="gpt-4o-mini",
         output_type=AboutSection,
-        llm=client # Pass the configured client
+        model_settings={"max_retries": 0} # Pass model_settings instead of llm client
     )
 
-def get_features_agent(client: openai.OpenAI) -> Agent:
+def get_features_agent() -> Agent:
     features_instructions = (
         "You create a features/skills list section for a personal site. Pick 3 to 5 key points about the person (achievements, skills, or services) and output them as a list. "
         "Each feature has a short title and a one-sentence description. "
@@ -59,13 +59,13 @@ def get_features_agent(client: openai.OpenAI) -> Agent:
         instructions=features_instructions,
         model="gpt-4o-mini",
         output_type=FeaturesList,
-        llm=client # Pass the configured client
+        model_settings={"max_retries": 0} # Pass model_settings instead of llm client
     )
 
 # ---------------------------------------------------------------------
 # 2.  TRANSLATOR function-tool ----------------------------------------
 @function_tool
-async def translate_text(client: openai.OpenAI, text: str, target_language: str) -> str:
+async def translate_text(text: str, target_language: str) -> str:
     if not text or not target_language:
         logger.warning("translate_text called with empty text or target_language.")
         return text if text else "" # Return original text or empty if original is None/empty
@@ -73,7 +73,7 @@ async def translate_text(client: openai.OpenAI, text: str, target_language: str)
     prompt = f"Translate the following text to {target_language}. Output ONLY the translated text, with no additional explanations, commentary, or quotation marks. If the text is a name, a brand, a number, or an email address that should not be translated, return it as is. Text to translate: \"{text}\""
     
     try:
-        completion = await client.chat.completions.create(
+        completion = await openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are a helpful translation assistant."},
@@ -109,7 +109,7 @@ async def translate_text(client: openai.OpenAI, text: str, target_language: str)
 
 # ---------------------------------------------------------------------
 # 3.  AUTONOMOUS RESEARCHER AGENT -------------------------------------
-def get_researcher_agent(client: openai.OpenAI) -> Agent:
+def get_researcher_agent() -> Agent:
     researcher_instructions = """You are an advanced web-search agent tasked with conducting in-depth research about a person using a provided list of search queries.
 Based on the person's profile (name, title, etc.) AND the specific search queries provided to you, your goal is to execute each query, find multiple high-quality sources, and return ALL found sources as a single, flat LIST of ResearchDoc JSON objects.
 You have one primary tool at your disposal:
@@ -138,7 +138,7 @@ Follow these steps carefully:
             agent_web_search, # Assuming agent_web_search does not require the client directly
         ],
         output_type=List[ResearchDoc],
-        llm=client # Pass the configured client
+        model_settings={"max_retries": 0} # Pass model_settings instead of llm client
     )
 
 # ---------------------------------------------------------------------

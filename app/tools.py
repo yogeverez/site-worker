@@ -285,9 +285,11 @@ async def do_research(uid: str, timestamp: int | None = None):
             f"Please find and return all relevant sources."
         )
         
-        researcher_agent_instance = get_researcher_agent(oai_client)
-        # Run researcher agent
-        # The researcher_agent is expected to return a list of ResearchDoc objects or None on error
+        researcher_agent_instance = get_researcher_agent() # Removed client argument
+        
+        logger.info(f"Running researcher agent for user {uid} with {len(search_queries)} queries.")
+        # Pass context if your Agent/Runner setup uses it, e.g., context={"uid": uid}
+        # For now, assuming no specific context object is needed beyond what agent might self-manage or get via prompt
         agent_results = await run_agent_safely(researcher_agent_instance, researcher_prompt)
 
         if agent_results is None:
@@ -404,9 +406,9 @@ async def generate_site_content(uid: str, languages: List[str], timestamp: int |
         base_prompt = json.dumps(site_input) 
 
         # Initialize agents
-        hero_agent_instance = get_hero_agent(oai_client)
-        about_agent_instance = get_about_agent(oai_client)
-        features_agent_instance = get_features_agent(oai_client)
+        hero_agent_instance = get_hero_agent()
+        about_agent_instance = get_about_agent()
+        features_agent_instance = get_features_agent()
 
         # Store generated content (original language)
         generated_content = {}
@@ -485,12 +487,12 @@ async def generate_site_content(uid: str, languages: List[str], timestamp: int |
                     for key, value in content_item.items():
                         if isinstance(value, str) and value.strip():
                             # translated_text is now async, ensure oai_client is passed
-                            translated_value = await translate_text(oai_client, value, lang)
-                            if "Error: Translation failed" in translated_value:
+                            translated_value = await translate_text(text=value, target_language=lang)
+                            if translated_value and "Error: Translation failed" not in translated_value:
+                                translated_section[key] = translated_value
+                            else:
                                 logger.error(f"Translation failed for text in section '{section}', key '{key}' to {lang} for {uid}. Details: {translated_value}")
                                 translated_section[key] = value # Fallback to original value
-                            else:
-                                translated_section[key] = translated_value
                         elif isinstance(value, list):
                             # Handle lists (e.g., features in FeaturesList)
                             translated_list_items = []
@@ -500,12 +502,12 @@ async def generate_site_content(uid: str, languages: List[str], timestamp: int |
                                     for item_key, item_value in item.items():
                                         if isinstance(item_value, str) and item_value.strip():
                                             # translated_text is now async
-                                            translated_list_value = await translate_text(oai_client, item_value, lang)
-                                            if "Error: Translation failed" in translated_list_value:
+                                            translated_list_value = await translate_text(text=item_value, target_language=lang)
+                                            if translated_list_value and "Error: Translation failed" not in translated_list_value:
+                                                translated_item_dict[item_key] = translated_list_value
+                                            else:
                                                 logger.error(f"Translation failed for list item in section '{section}', key '{item_key}' to {lang} for {uid}. Details: {translated_list_value}")
                                                 translated_item_dict[item_key] = item_value # Fallback
-                                            else:
-                                                translated_item_dict[item_key] = translated_list_value
                                         else:
                                             translated_item_dict[item_key] = item_value # Non-string or empty string
                                     translated_list_items.append(translated_item_dict)
