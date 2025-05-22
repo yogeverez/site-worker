@@ -110,7 +110,7 @@ async def do_research(uid: str, timestamp: int | None = None):
     Perform research using either:
       • researcher_agent  (RESEARCH_MODE=agent  – default)
       • legacy pipeline   (RESEARCH_MODE=legacy)
-    Stores docs at users/{uid}/research/{docId}
+    Stores docs at research/{uid}/sources/{docId}
     """
     try:
         logger.info(f"Starting research for user {uid}")
@@ -184,54 +184,69 @@ async def do_research(uid: str, timestamp: int | None = None):
             logger.info(f"Running researcher_agent in thread: {current_thread.name}")
             
             # Use our thread-safe runner function
-            agent_output_obj = await run_agent_safely(researcher_agent, prompt)
-            raw_agent_output = agent_output_obj.final_output # This should be ResearchDoc or None
+            agent_output = await run_agent_safely(researcher_agent, prompt)
+            logger.info(f"Successfully received output from agent for user {uid}. Type: {type(agent_output)}")
 
-            final_research_output: List[Dict[str, Any]] = []
-            parsed_docs: List[ResearchDoc] = [] # Will hold at most one doc
+            if not agent_output or not hasattr(agent_output, 'final_output') or agent_output.final_output is None:
+                logger.warning(f"Agent for {uid} did not return a valid final_output. Raw output: {agent_output}")
+                logger.info(f"Falling back to legacy research for {uid} due to missing/invalid agent output.")
+                _legacy_research(uid, user_input, timestamp)
+                return # Exit after fallback
+            
+            # If we reach here, agent_output and agent_output.final_output are considered valid
+            raw_agent_output = agent_output.final_output 
+
+            final_research_output: List[Dict[str, Any]] = [] # This will hold dicts for Firestore, not used by current agent logic
+            parsed_docs: List[ResearchDoc] = [] 
 
             if isinstance(raw_agent_output, ResearchDoc):
-                # If the agent successfully returns a ResearchDoc object
                 parsed_docs.append(raw_agent_output)
                 logger.info(f"Successfully received ResearchDoc object from agent for user {uid}.")
+            elif isinstance(raw_agent_output, list) and all(isinstance(item, ResearchDoc) for item in raw_agent_output):
+                parsed_docs.extend(raw_agent_output)
+                logger.info(f"Successfully received a list of {len(raw_agent_output)} ResearchDoc objects from agent for user {uid}.")
             elif raw_agent_output is None:
-                logger.info(f"Researcher agent for user {uid} returned None as final_output.")
+                # This case should have been caught by the check above, but as a safeguard:
+                logger.info(f"Researcher agent for user {uid} returned None as final_output (safeguard check).")
+                logger.info(f"Falling back to legacy research for {uid} due to None agent output (safeguard check).")
+                _legacy_research(uid, user_input, timestamp)
+                return # Exit after fallback
             else:
-                # If it's not a ResearchDoc and not None, it's an unexpected type or an error indicator from the SDK
-                logger.warning(f"Researcher agent for user {uid} returned unexpected type: {type(raw_agent_output)}. Content: {str(raw_agent_output)[:500]}. Expected ResearchDoc or None.")
-                # Consider if this case should attempt to parse raw_agent_output if it's a string/dict, or just log.
-                # For now, strict expectation: SDK should provide ResearchDoc or None.
+                logger.warning(f"Researcher agent for user {uid} returned unexpected type: {type(raw_agent_output)}. Content: {str(raw_agent_output)[:500]}. Expected ResearchDoc or list of ResearchDoc.")
+                logger.info(f"Falling back to legacy research for {uid} due to unexpected agent output type.")
+                _legacy_research(uid, user_input, timestamp)
+                return # Exit after fallback
 
-            # Convert List[ResearchDoc] (max 1 item) to List[Dict[str, Any]] for Firestore
-            if parsed_docs:
-                for doc in parsed_docs: # Loop will run at most once
-                    if isinstance(doc, ResearchDoc):
-                        final_research_output.append(doc.model_dump())
-                    else:
-                        logger.warning(f"Encountered non-ResearchDoc item in parsed_docs: {type(doc)}. Skipping.") # Should not happen
-            else:
-                logger.warning(f"No ResearchDoc was successfully obtained for user {uid} from agent output.")
+            if not parsed_docs:
+                logger.warning(f"No ResearchDoc was successfully obtained or parsed for user {uid} from agent output.")
+                logger.info(f"Falling back to legacy research for {uid} due to no parsable ResearchDocs.")
+                _legacy_research(uid, user_input, timestamp)
+                return # Exit after fallback
 
             # Store research results in Firestore
             db = get_db()
             if db:
-                user_research_col = db.collection(f"users/{uid}/research")
+                user_research_col = db.collection(f"research/{uid}/sources")
                 # Delete existing research documents before adding new ones
                 for old_doc in user_research_col.stream():
                     old_doc.reference.delete()
+                logger.info(f"Cleared existing research documents for {uid} in {user_research_col.path}")
                 
-                for i, doc_data in enumerate(final_research_output):
-                    if isinstance(doc_data, dict):
-                        doc_ref = user_research_col.document(f"doc_{i}")
-                        doc_ref.set(doc_data)
-                        logger.info(f"Stored research document doc_{i} for user {uid}")
-                    else:
-                        logger.error(f"Attempted to store non-dict item as research document for user {uid}: {type(doc_data)}")
+                # Use the parsed_docs (list of ResearchDoc objects)
+                for i, doc_content in enumerate(parsed_docs):
+                    # doc_content is already a ResearchDoc instance
+                    doc_id = f"doc_{int(time.time())}_{i}" 
+                    research_doc_data = doc_content.model_dump() # Convert Pydantic model to dict
+                    research_doc_data["timestamp"] = timestamp or int(time.time())
+                    
+                    output_doc_ref = db.collection("research").document(uid).collection("sources").document(doc_id)
+                    output_doc_ref.set(research_doc_data)
+                    logger.info(f"Stored research document {doc_id} for user {uid} at {output_doc_ref.path}")
             else:
                 logger.error(f"Firestore client not available. Cannot store research for user {uid}.")
 
         except Exception as e:
-            logger.error(f"Error with researcher_agent for {uid}: {e}")
+            logger.error(f"Error in agent-based research for user {uid}: {e}", exc_info=True)
             # Fall back to legacy research if agent fails
             logger.info(f"Falling back to legacy research for {uid}")
             _legacy_research(uid, user_input, timestamp)
@@ -306,7 +321,7 @@ def _legacy_research(uid: str, user_input: dict, timestamp: int | None = None):
             # Store in research/{uid}/sources collection
             sources_collection = db.collection("research").document(uid).collection("sources")
             sources_collection.document(doc_id).set(doc_data)
-            logger.info(f"Stored research document {doc_id} for user {uid}")
+            logger.info(f"Stored research document {doc_id} for user {uid} at {sources_collection.document(doc_id).path}")
     except Exception as e:
         logger.error(f"Error in legacy research for user {uid}: {e}")
         # Return gracefully instead of crashing the worker
@@ -371,9 +386,8 @@ async def generate_site_content(uid: str, languages: list[str], timestamp: int =
 
         # Store the generated content for the base language (first in list)
         base_lang = languages[0]
-        comp_coll = db.collection("users").document(uid)\
-                    .collection("siteContent").document(base_lang)\
-                    .collection("components")
+        comp_coll = db.collection("siteContent").document(uid)\
+                    .collection(base_lang)
         comp_coll.document("hero").set({"timestamp": timestamp or int(time.time()), **hero_json})
         comp_coll.document("about").set({"timestamp": timestamp or int(time.time()), **about_json})
         comp_coll.document("featuresList").set({"timestamp": timestamp or int(time.time()), **features_json})
@@ -386,9 +400,8 @@ async def generate_site_content(uid: str, languages: list[str], timestamp: int =
             hero_trans = _translate_component_dict(hero_json, lang)
             about_trans = _translate_component_dict(about_json, lang)
             features_trans = _translate_component_dict(features_json, lang)
-            comp_coll = db.collection("users").document(uid)\
-                        .collection("siteContent").document(lang)\
-                        .collection("components")
+            comp_coll = db.collection("siteContent").document(uid)\
+                        .collection(lang)
             comp_coll.document("hero").set({"timestamp": timestamp or int(time.time()), **hero_trans})
             comp_coll.document("about").set({"timestamp": timestamp or int(time.time()), **about_trans})
             comp_coll.document("featuresList").set({"timestamp": timestamp or int(time.time()), **features_trans})
