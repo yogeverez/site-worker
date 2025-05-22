@@ -1,7 +1,7 @@
 flask==2.3.2
 gunicorn==20.1.0
 openai==0.28.0           # OpenAI Python SDK (for ChatCompletion)
-openai-agents==0.1.2     # Latest OpenAI Agents SDK for multi-agent orchestration
+openai-agents==0.0.16    # OpenAI Agents SDK for multi-agent orchestration (imported as 'agents')
 pydantic==2.0.3          # Pydantic for models (Agents SDK will use this for output schemas)
 google-cloud-firestore==2.11.0
 requests==2.31.0
