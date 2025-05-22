@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 
 class HeroSection(BaseModel):
     headline: str = Field(..., description="Main bold headline (usually the user's name or branding)")
@@ -14,3 +14,9 @@ class FeatureItem(BaseModel):
 
 class FeaturesList(BaseModel):
     features: List[FeatureItem] = Field(..., description="List of key features or achievements about the user")
+
+class ResearchDoc(BaseModel):
+    title: str = Field(..., description="Title of the research document or webpage")
+    url: str = Field(..., description="URL of the source")
+    content: str = Field(..., description="Summarized content from the source")
+    source_type: Optional[str] = Field(None, description="Type of source (e.g., 'linkedin', 'twitter', 'article')")

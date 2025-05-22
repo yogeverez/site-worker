@@ -1,10 +1,12 @@
 import os, requests, re
 import time
 import logging
+import urllib.parse
+from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 from google.cloud import firestore
 # Import local agents module components
-from site_agents import hero_agent, about_agent, features_agent, translate_text
+from site_agents import hero_agent, about_agent, features_agent, translate_text, researcher_agent, ResearchDoc
 from agents import Runner
 from schemas import HeroSection, AboutSection, FeaturesList
 
@@ -117,8 +119,13 @@ def search_web(query: str, num_results: int = 5) -> list[dict]:
     
     return results
 
-def fetch_page_content(url: str) -> tuple[str, str]:
-    """Fetch the page at url and return (title, plaintext_content)."""
+# Helper functions for the researcher_agent
+def web_search(query: str, num_results: int = 5) -> List[Dict[str, str]]:
+    """Search the web using SerpAPI and return a list of result dicts."""
+    return search_web(query, num_results)
+
+def fetch_url(url: str) -> str:
+    """Fetch the raw HTML content from a URL."""
     # Add retry logic for fetching page content
     max_retries = 2  # Fewer retries for page content to avoid long delays
     retry_count = 0
@@ -137,12 +144,8 @@ def fetch_page_content(url: str) -> tuple[str, str]:
             )
             
             if resp.status_code == 200 and resp.text:
-                # Parse HTML content
-                soup = BeautifulSoup(resp.text, "html.parser")
-                # Get page title
-                title = soup.title.string.strip() if soup.title else url
                 logger.info(f"Successfully fetched content from {url}")
-                break  # Success, exit retry loop
+                return resp.text
             else:
                 logger.warning(f"Failed to fetch content from {url}: HTTP {resp.status_code}")
                 retry_count += 1
@@ -155,37 +158,115 @@ def fetch_page_content(url: str) -> tuple[str, str]:
                 time.sleep(1)  # Wait before retrying
             else:
                 logger.error(f"Failed to fetch content after {max_retries} attempts")
-                return ("", "")
     
-    # If we got here without returning, we have a valid response
-    if not hasattr(resp, 'text') or not resp.text:
+    return ""
+
+def strip_html(html: str) -> str:
+    """Convert HTML to plain text."""
+    if not html:
+        return ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        # Remove script and style tags
+        for tag in soup(["script", "style", "noscript"]):
+            tag.extract()
+        text = soup.get_text(separator=" ")
+        # Collapse whitespace
+        return re.sub(r"\s+\s+", " ", text).strip()
+    except Exception as e:
+        logger.error(f"Error stripping HTML: {e}")
+        return ""
+
+# Keep the original fetch_page_content function for backward compatibility
+def fetch_page_content(url: str) -> tuple[str, str]:
+    """Fetch the page at url and return (title, plaintext_content)."""
+    html = fetch_url(url)
+    if not html:
         return ("", "")
-        
+    
     # Parse HTML content
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(html, "html.parser")
     # Get page title
     title = soup.title.string.strip() if soup.title and soup.title.string else url
-    # Remove script and style tags
-    for tag in soup(["script", "style", "noscript"]):
-        tag.extract()
-    text = soup.get_text(separator=" ")
-    # Collapse whitespace
-    content = re.sub(r"\s+\s+", " ", text).strip()
+    # Get content using strip_html
+    content = strip_html(html)
     return (title, content)
 
-def do_research(uid: str, timestamp: int = None):
-    """Perform web research based on the user's input document and store results in Firestore."""
+def do_research(uid: str, timestamp: int | None = None):
+    """
+    Perform research using either:
+      • researcher_agent  (RESEARCH_MODE=agent  – default)
+      • legacy pipeline   (RESEARCH_MODE=legacy)
+    Stores docs at users/{uid}/research/{docId}
+    """
     try:
         logger.info(f"Starting research for user {uid}")
+        # Determine which research mode to use
+        mode = os.getenv("RESEARCH_MODE", "agent").lower()
+        
         # Get basic info about the user (name, title, social URLs)
-        input_doc = get_site_input(uid)
-        if not input_doc:
-            logger.warning(f"No input document found for user {uid}")
+        user_input = get_site_input(uid)
+        if not user_input:
+            logger.warning(f"No siteInputDocument for {uid}")
             return
 
-        name = input_doc.get("name")
-        title = input_doc.get("title") or input_doc.get("job_title")
-        social_urls = input_doc.get("socialUrls", {})  # e.g. {"linkedin": "...", "twitter": "..."} or list
+        if mode == "legacy":
+            logger.info("[research] Using legacy research mode")
+            _legacy_research(uid, user_input, timestamp)
+            return
+
+        # -------- researcher_agent path ----------
+        logger.info("[research] Using agent-based research mode")
+        name = user_input.get("name", "")
+        title = user_input.get("title") or user_input.get("job_title", "")
+        socials = user_input.get("socialUrls", {})
+        social_lines = (
+            "\n".join(str(v) for v in socials.values())
+            if isinstance(socials, dict) else ""
+        )
+
+        prompt = (
+            f"Name: {name}\nTitle: {title}\nSocials:\n{social_lines}\n\n"
+            "Find up to 8 high-quality sources about this person and "
+            "return them as a JSON array of ResearchDoc objects."
+        )
+
+        # Call the agent (blocking)
+        try:
+            logger.info(f"Running researcher_agent for {uid}")
+            result = researcher_agent.run(prompt)          # synchronous call
+            docs: List[ResearchDoc] = result.final_output  # already schema-validated
+            logger.info(f"Researcher agent found {len(docs)} sources for {uid}")
+
+            # Write each ResearchDoc to Firestore
+            db = get_db()
+            coll = db.collection("users").document(uid).collection("research")
+            for idx, doc in enumerate(docs, 1):
+                doc_id = f"src{idx:02d}"
+                coll.document(doc_id).set(
+                    doc.model_dump() | {"timestamp": timestamp or int(time.time())}
+                )
+                logger.info(f"Saved research doc {doc_id} for {uid}")
+        except Exception as e:
+            logger.error(f"Error with researcher_agent for {uid}: {e}")
+            # Fall back to legacy research if agent fails
+            logger.info(f"Falling back to legacy research for {uid}")
+            _legacy_research(uid, user_input, timestamp)
+    except Exception as e:
+        logger.error(f"Error in do_research for user {uid}: {e}")
+        # Return gracefully instead of crashing the worker
+        return
+
+def _legacy_research(uid: str, user_input: dict, timestamp: int | None = None):
+    """
+    Original search_web → fetch_page_content loop
+    (code identical to previous implementation)
+    """
+    try:
+        logger.info(f"Running legacy research for user {uid}")
+        name = user_input.get("name")
+        title = user_input.get("title") or user_input.get("job_title")
+        social_urls = user_input.get("socialUrls", {})  # e.g. {"linkedin": "...", "twitter": "..."} or list
 
         # Prepare a list of targets to research: start with any given social/profile URLs
         targets = []
@@ -234,16 +315,21 @@ def do_research(uid: str, timestamp: int = None):
                 "url": url,
                 "title": title[:200],  # limit title length
                 "content": content[:10000],  # store up to 10k chars of content
-                "source": source,
-                "timestamp": timestamp or int(time.time()),
-                "meta": {}
+                "source_type": source,
+                "timestamp": timestamp or int(time.time())
             }
             db.collection("users").document(uid).collection("research").document(doc_id).set(doc_data)
             logger.info(f"Stored research document {doc_id} for user {uid}")
     except Exception as e:
-        logger.error(f"Error in do_research for user {uid}: {e}")
+        logger.error(f"Error in legacy research for user {uid}: {e}")
         # Return gracefully instead of crashing the worker
         return
+
+# Initialize the site_agents module functions to avoid circular imports
+import site_agents
+site_agents.web_search = web_search
+site_agents.fetch_url = fetch_url
+site_agents.strip_html = strip_html
 
 def generate_site_content(uid: str, languages: list[str], timestamp: int = None):
     """Generate website components from research docs and store them (supports multiple languages)."""
