@@ -1,8 +1,9 @@
 import os, requests, re
 import time
 import logging
-import urllib.parse
 import asyncio
+import urllib.parse
+import threading
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 from google.cloud import firestore
@@ -236,16 +237,16 @@ def do_research(uid: str, timestamp: int | None = None):
         # Call the agent (blocking)
         try:
             logger.info(f"Running researcher_agent for {uid}")
-            # Create and set a new event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                result = Runner.run_sync(researcher_agent, prompt)   # synchronous call
-                docs: List[ResearchDoc] = result.final_output  # already schema-validated
-                logger.info(f"Researcher agent found {len(docs)} sources for {uid}")
-            finally:
-                # Clean up the event loop
-                loop.close()
+            
+            # Log the current thread for debugging
+            current_thread = threading.current_thread()
+            logger.info(f"Running researcher_agent in thread: {current_thread.name}")
+            
+            # Use the SDK's built-in synchronous runner
+            result = Runner.run_sync(researcher_agent, prompt)
+                
+            docs: List[ResearchDoc] = result.final_output  # already schema-validated
+            logger.info(f"Researcher agent found {len(docs)} sources for {uid}")
 
             # Write each ResearchDoc to Firestore using research/{uid}/sources structure
             db = get_db()
@@ -379,25 +380,22 @@ def generate_site_content(uid: str, languages: list[str], timestamp: int = None)
             "Now produce the requested section in the required JSON format."
         )
 
-        # Create and set a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            # Run each agent to get structured content
-            logger.info(f"Running hero agent for user {uid}")
-            hero_result = Runner.run_sync(hero_agent, user_prompt)
-            hero_data = hero_result.final_output  # HeroSection model instance
-            
-            logger.info(f"Running about agent for user {uid}")
-            about_result = Runner.run_sync(about_agent, user_prompt)
-            about_data = about_result.final_output  # AboutSection model
-            
-            logger.info(f"Running features agent for user {uid}")
-            features_result = Runner.run_sync(features_agent, user_prompt)
-            features_data = features_result.final_output  # FeaturesList model
-        finally:
-            # Clean up the event loop
-            loop.close()
+        # Log the current thread for debugging
+        current_thread = threading.current_thread()
+        logger.info(f"Running content generation in thread: {current_thread.name}")
+        
+        # Run each agent to get structured content using the SDK's built-in synchronous runner
+        logger.info(f"Running hero agent for user {uid}")
+        hero_result = Runner.run_sync(hero_agent, user_prompt)
+        hero_data = hero_result.final_output  # HeroSection model instance
+        
+        logger.info(f"Running about agent for user {uid}")
+        about_result = Runner.run_sync(about_agent, user_prompt)
+        about_data = about_result.final_output  # AboutSection model
+        
+        logger.info(f"Running features agent for user {uid}")
+        features_result = Runner.run_sync(features_agent, user_prompt)
+        features_data = features_result.final_output  # FeaturesList model
 
         # Convert Pydantic model instances to dict for storing
         hero_json = hero_data.model_dump()
