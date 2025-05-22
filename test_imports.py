@@ -51,9 +51,11 @@ def main():
     test_import("google.cloud")
     test_import("google.cloud.firestore")
     
-    # OpenAI
+    # OpenAI and Pydantic
     test_import("openai")
     test_import("agents")
+    test_import("pydantic")
+    test_import("pydantic_core")
     
     # Web scraping
     test_import("requests")

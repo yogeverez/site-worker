@@ -9,6 +9,7 @@ gunicorn==20.1.0
 openai>=1.81.0           # OpenAI Python SDK (newer client-based API)
 openai-agents==0.0.16    # OpenAI Agents SDK for multi-agent orchestration
 pydantic>=2.10.0         # Pydantic for models (required by openai-agents)
+pydantic-core>=2.33.0    # Required by pydantic
 google-cloud-firestore==2.11.0
 requests==2.31.0
 beautifulsoup4==4.12.2
