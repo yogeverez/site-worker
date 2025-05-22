@@ -1,97 +1,214 @@
-"""
-Shared utility functions (web fetch, search, image search, Firestore write).
-"""
-from __future__ import annotations
-import os, random, re, requests
-import logging
-from typing import List, Dict, Any
+import os, requests, re
 from bs4 import BeautifulSoup
+from google.cloud import firestore
+from agents import Runner, hero_agent, about_agent, features_agent, translate_text
+from schemas import HeroSection, AboutSection, FeaturesList
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Initialize Firestore client (project inferred from environment or ADC)
+db = firestore.Client()
 
-# Initialize Firestore client
-try:
-    # In Cloud Run, this will use the default service account credentials
-    # In local development, it will use Application Default Credentials if available
-    # or raise an exception which we'll catch
-    from google.cloud import firestore
-    db = firestore.Client()
-    FIRESTORE_AVAILABLE = True
-    logger.info("Firestore client initialized successfully")
-except Exception as e:
-    logger.warning(f"Firestore client initialization failed: {e}")
-    logger.warning("Running in local development mode without Firestore")
-    db = None
-    FIRESTORE_AVAILABLE = False
+# SerpAPI configuration
+SERPAPI_API_KEY = os.getenv("SERPAPI_KEY", "")
 
-# ------------------------------------------------------------------ #
-# 1.  Basic web fetching / stripping
-# ------------------------------------------------------------------ #
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SiteGeneratorBot/1.0)"}
-TAG_RE = re.compile(r"<[^>]+>")
+def get_site_input(uid: str) -> dict:
+    """Fetch the user's input document (name, job title, social URLs) from Firestore."""
+    doc_ref = db.collection("users").document(uid).collection("siteInput").document("siteInputDocument")
+    doc = doc_ref.get()
+    return doc.to_dict() if doc.exists else {}
 
-def fetch_url(url: str) -> str:
-    """Return raw HTML (limited to 100 kB)."""
-    r = requests.get(url, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    return r.text[:100_000]
-
-def strip_html(html: str) -> str:
-    """Very naive HTML → plaintext."""
-    return TAG_RE.sub(" ", html)
-
-# ------------------------------------------------------------------ #
-# 2.  Web & image search
-# ------------------------------------------------------------------ #
-SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
-SERP_ENDPOINT = "https://serpapi.com/search.json"
-BING_SEARCH_URL = os.getenv("BING_SEARCH_URL", "")  # optional
-UNSPLASH_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
-UNSPLASH_ENDPOINT = "https://api.unsplash.com/search/photos"
-
-def web_search(query: str, k: int = 10) -> List[str]:
-    """Return top-k result URLs for a query."""
-    if SERPAPI_KEY:
-        params = {"api_key": SERPAPI_KEY, "q": query, "num": k}
-        try:
-            resp = requests.get(SERP_ENDPOINT, params=params, timeout=15).json()
-            return [r["link"] for r in resp.get("organic_results", [])][:k]
-        except Exception as e:
-            print("SerpAPI failed:", e)
-
-    # fallback – crude Bing scrape
-    if BING_SEARCH_URL:
-        html = requests.get(BING_SEARCH_URL + query, headers=HEADERS, timeout=15).text
-        soup = BeautifulSoup(html, "html.parser")
-        return [a["href"] for a in soup.select("li.b_algo h2 a")[:k]]
-    return []
-
-def image_search(query: str, k: int = 5) -> List[str]:
-    """Unsplash free-to-use images."""
-    if not UNSPLASH_KEY:
+def search_web(query: str, num_results: int = 5) -> list[dict]:
+    """Use SerpAPI to search the web and return a list of result dicts (title, link, snippet)."""
+    if not SERPAPI_API_KEY:
         return []
-    headers = {"Authorization": f"Client-ID {UNSPLASH_KEY}"}
-    resp = requests.get(UNSPLASH_ENDPOINT, params={"query": query, "per_page": k}, headers=headers, timeout=15)
-    resp.raise_for_status()
-    return [p["urls"]["regular"] for p in resp.json().get("results", [])]
+    params = {
+        "engine": "google", 
+        "q": query, 
+        "api_key": SERPAPI_API_KEY,
+        "num": num_results
+    }
+    resp = requests.get("https://serpapi.com/search", params=params, timeout=15)
+    results = []
+    if resp.status_code == 200:
+        data = resp.json()
+        for res in data.get("organic_results", []):
+            link = res.get("link")
+            title = res.get("title")
+            snippet = res.get("snippet")
+            if link and title:
+                results.append({"title": title, "url": link, "snippet": snippet})
+    return results
 
-def random_image(query: str) -> str | None:
-    imgs = image_search(query, 10)
-    return random.choice(imgs) if imgs else None
+def fetch_page_content(url: str) -> tuple[str, str]:
+    """Fetch the page at url and return (title, plaintext_content)."""
+    try:
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+    except Exception as e:
+        return ("", "")
+    if resp.status_code != 200 or not resp.text:
+        return ("", "")
+    # Parse HTML content
+    soup = BeautifulSoup(resp.text, "html.parser")
+    # Get page title
+    title = soup.title.string.strip() if soup.title else url
+    # Remove script and style tags
+    for tag in soup(["script", "style", "noscript"]):
+        tag.extract()
+    text = soup.get_text(separator=" ")
+    # Collapse whitespace
+    content = re.sub(r"\s+\s+", " ", text).strip()
+    return (title, content)
 
-# ------------------------------------------------------------------ #
-# 3. Firestore writer
-# ------------------------------------------------------------------ #
-def save_component(uid: str, lang: str, component: str, data: Dict[str, Any]):
-    """Write `{component}.json` into users/{uid}/siteContent/{lang}/components/."""
-    if not FIRESTORE_AVAILABLE:
-        logger.info(f"[LOCAL DEV] Would save component '{component}' for user {uid} in language {lang}")
-        logger.info(f"[LOCAL DEV] Component data: {data}")
+def do_research(uid: str, timestamp: int = None):
+    """Perform web research based on the user's input document and store results in Firestore."""
+    # Get basic info about the user (name, title, social URLs)
+    input_doc = get_site_input(uid)
+    if not input_doc:
+        print(f"No input document found for user {uid}", flush=True)
         return
-        
-    # Only execute if Firestore is available
-    db.collection("users").document(uid) \
-      .collection("siteContent").document(lang) \
-      .collection("components").document(component).set(data)
+
+    name = input_doc.get("name")
+    title = input_doc.get("title") or input_doc.get("job_title")
+    social_urls = input_doc.get("socialUrls", {})  # e.g. {"linkedin": "...", "twitter": "..."} or list
+
+    # Prepare a list of targets to research: start with any given social/profile URLs
+    targets = []
+    if isinstance(social_urls, dict):
+        for source, url in social_urls.items():
+            targets.append((source.lower(), url))
+    elif isinstance(social_urls, list):
+        for url in social_urls:
+            domain = "social"
+            if "linkedin" in url: domain = "linkedin"
+            elif "twitter" in url: domain = "twitter"
+            targets.append((domain, url))
+
+    # Also, use web search for the person's name and title to find additional info
+    if name:
+        query = name if not title else f"{name} {title}"
+        results = search_web(query, num_results=5)
+        for res in results:
+            url = res["url"]
+            # Skip if same as an already targeted URL
+            if any(url == t[1] for t in targets):
+                continue
+            # Identify source name from domain
+            domain = re.sub(r'^www\.', '', requests.utils.urlparse(url).netloc)
+            source = domain.lower() or "web"
+            targets.append((source, url))
+
+    # Fetch each target page and store content
+    for source, url in targets:
+        title, content = fetch_page_content(url)
+        if not content:
+            continue  # skip if fetch failed or content empty
+        # Generate a unique document ID for Firestore
+        # Use source name; if already used, append a number
+        doc_id = source
+        # Ensure unique doc_id in case of duplicates
+        existing = db.collection("users").document(uid).collection("research").document(doc_id).get()
+        idx = 1
+        while existing.exists:
+            idx += 1
+            doc_id = f"{source}{idx}"
+            existing = db.collection("users").document(uid).collection("research").document(doc_id).get()
+        # Prepare the document data
+        doc_data = {
+            "url": url,
+            "title": title[:200],  # limit title length
+            "content": content[:10000],  # store up to 10k chars of content
+            "source": source,
+            "timestamp": timestamp or int(os.time.time()),
+            "meta": {}
+        }
+        db.collection("users").document(uid).collection("research").document(doc_id).set(doc_data)
+        print(f"Stored research document {doc_id} for user {uid}", flush=True)
+
+def generate_site_content(uid: str, languages: list[str], timestamp: int = None):
+    """Generate website components from research docs and store them (supports multiple languages)."""
+    # Load research documents for the user
+    docs = db.collection("users").document(uid).collection("research").stream()
+    research_docs = [doc.to_dict() for doc in docs]
+    # Also include the original input data for completeness
+    input_doc = get_site_input(uid) or {}
+    name = input_doc.get("name", "")
+    title = input_doc.get("title") or input_doc.get("job_title") or ""
+    basic_info = f"Name: {name}\nTitle: {title}\n"
+    # Compile context for the agents: brief info plus snippets from research
+    context_lines = [basic_info]
+    for doc in research_docs:
+        src = doc.get("source", "")
+        title = doc.get("title", "")
+        content = doc.get("content", "")
+        # Truncate content to a reasonable length for context
+        if content and len(content) > 1000:
+            content = content[:1000] + "..."
+        context_lines.append(f"Source ({src} - {title}): {content}")
+    context_text = "\n\n".join(context_lines).strip()
+
+    # Define a common user prompt for all agents, providing the context info
+    user_prompt = (
+        f"Use the following information about the user to create website content sections:\n{context_text}\n\n"
+        "Now produce the requested section in the required JSON format."
+    )
+
+    # Run each agent to get structured content
+    hero_result = Runner.run_sync(hero_agent, user_prompt)
+    hero_data = hero_result.final_output  # HeroSection model instance
+    about_result = Runner.run_sync(about_agent, user_prompt)
+    about_data = about_result.final_output  # AboutSection model
+    features_result = Runner.run_sync(features_agent, user_prompt)
+    features_data = features_result.final_output  # FeaturesList model
+
+    # Convert Pydantic model instances to dict for storing
+    hero_json = hero_data.model_dump()
+    about_json = about_data.model_dump()
+    features_json = features_data.model_dump()
+
+    # Store the generated content for the base language (first in list)
+    base_lang = languages[0]
+    comp_coll = db.collection("users").document(uid)\
+                  .collection("siteContent").document(base_lang)\
+                  .collection("components")
+    comp_coll.document("hero").set({"timestamp": timestamp, **hero_json})
+    comp_coll.document("about").set({"timestamp": timestamp, **about_json})
+    comp_coll.document("featuresList").set({"timestamp": timestamp, **features_json})
+    print(f"Stored site content for base language '{base_lang}' for user {uid}", flush=True)
+
+    # Translate to additional languages if any
+    for lang in languages[1:]:
+        # Deep copy the original JSONs to avoid in-place modifications
+        hero_trans = _translate_component_dict(hero_json, lang)
+        about_trans = _translate_component_dict(about_json, lang)
+        features_trans = _translate_component_dict(features_json, lang)
+        comp_coll = db.collection("users").document(uid)\
+                      .collection("siteContent").document(lang)\
+                      .collection("components")
+        comp_coll.document("hero").set({"timestamp": timestamp, **hero_trans})
+        comp_coll.document("about").set({"timestamp": timestamp, **about_trans})
+        comp_coll.document("featuresList").set({"timestamp": timestamp, **features_trans})
+        print(f"Stored site content for language '{lang}' for user {uid}", flush=True)
+
+def _translate_component_dict(comp_dict: dict, target_lang: str) -> dict:
+    """Recursively translate all string values in a component JSON dict to the target language."""
+    translated = {}
+    for key, value in comp_dict.items():
+        # Do not translate the key names, only the values
+        if isinstance(value, str):
+            translated_value = translate_text(value, target_lang)
+            translated[key] = translated_value
+        elif isinstance(value, list):
+            # Translate each element in list (e.g., list of features)
+            new_list = []
+            for item in value:
+                if isinstance(item, dict):
+                    new_list.append(_translate_component_dict(item, target_lang))
+                elif isinstance(item, str):
+                    new_list.append(translate_text(item, target_lang))
+                else:
+                    new_list.append(item)
+            translated[key] = new_list
+        elif isinstance(value, dict):
+            translated[key] = _translate_component_dict(value, target_lang)
+        else:
+            translated[key] = value  # keep other types as is
+    return translated
