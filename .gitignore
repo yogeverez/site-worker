@@ -44,3 +44,6 @@ Thumbs.db
 # Google Cloud
 *.json
 !package.json
+
+# Local environment setup
+set_env.sh
