@@ -1,9 +1,24 @@
-import os, base64, json
+import os, base64, json, time
+import logging
 from flask import Flask, request
 
 # Import helper modules and OpenAI Agents setup
 from openai import OpenAI
-from tools import do_research, generate_site_content
+
+# Import tools module (works in both local and Cloud Run environments)
+try:
+    # Try relative import first (for when running as a package)
+    from .tools import do_research, generate_site_content
+except ImportError:
+    # Fall back to absolute import (for when running directly)
+    from tools import do_research, generate_site_content
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # OpenAI client will be initialized in each function that needs it
 # using the API key from environment
@@ -13,51 +28,94 @@ app = Flask(__name__)
 @app.route("/", methods=["POST"])
 def pubsub_handler():
     """HTTP endpoint for Pub/Sub push messages."""
-    envelope = request.get_json(silent=True)
-    if not envelope or "message" not in envelope:
-        return ("Bad Request: no Pub/Sub message received", 400)
-    msg = envelope["message"]
-
-    # Decode the Pub/Sub message data (which is base64-encoded)
-    data = msg.get("data")
-    if data:
-        try:
-            payload = json.loads(base64.b64decode(data).decode("utf-8"))
-        except Exception as e:
-            return ("Bad Request: invalid message data", 400)
-    else:
-        payload = {}
-
-    # Extract job parameters
-    uid = payload.get("uid")
-    mode = payload.get("mode")
-    languages = payload.get("languages", [])
-    timestamp = payload.get("timestamp")  # Unix timestamp
-
-    if not uid or not mode or not languages:
-        return ("Bad Request: missing uid/mode/languages", 400)
-
-    # Process according to mode
+    start_time = time.time()
+    logger.info("Received Pub/Sub message")
+    
     try:
+        envelope = request.get_json(silent=True)
+        if not envelope or "message" not in envelope:
+            logger.warning("Bad Request: no Pub/Sub message received")
+            return ("Bad Request: no Pub/Sub message received", 400)
+        
+        msg = envelope["message"]
+        logger.info(f"Processing message ID: {msg.get('messageId', 'unknown')}")
+
+        # Decode the Pub/Sub message data (which is base64-encoded)
+        data = msg.get("data")
+        if data:
+            try:
+                payload = json.loads(base64.b64decode(data).decode("utf-8"))
+                logger.info(f"Successfully decoded message payload")
+            except Exception as e:
+                logger.error(f"Failed to decode message data: {e}")
+                return ("Bad Request: invalid message data", 400)
+        else:
+            logger.warning("No data in message payload")
+            payload = {}
+
+        # Extract job parameters
+        uid = payload.get("uid")
+        mode = payload.get("mode")
+        languages = payload.get("languages", [])
+        timestamp = payload.get("timestamp")  # Unix timestamp
+
+        logger.info(f"Job parameters - UID: {uid}, Mode: {mode}, Languages: {languages}")
+
+        if not uid or not mode or not languages:
+            logger.warning(f"Missing required parameters - UID: {uid}, Mode: {mode}, Languages: {languages}")
+            return ("Bad Request: missing uid/mode/languages", 400)
+
+        # Process according to mode
         if mode in ("research", "full"):
             # Perform web research and store results in Firestore
+            logger.info(f"Starting research mode for user {uid}")
             do_research(uid, timestamp=timestamp)
+            logger.info(f"Completed research mode for user {uid}")
+            
         if mode in ("generate", "full"):
             # Generate site content (and translations) using research data
+            logger.info(f"Starting content generation for user {uid} in languages: {languages}")
             generate_site_content(uid, languages, timestamp=timestamp)
+            logger.info(f"Completed content generation for user {uid}")
+
+        elapsed_time = time.time() - start_time
+        logger.info(f"Job completed successfully in {elapsed_time:.2f} seconds")
+        
+        # Acknowledge successful processing
+        return ("", 204)
+        
     except Exception as e:
-        # Log the error (could integrate with Cloud Logging)
-        print(f"Error processing job for user {uid}: {e}", flush=True)
-        # Return 200 to avoid Pub/Sub retries (or could return 500 to retry)
-        return ("Internal Server Error", 500)
+        # Log the error with full traceback
+        elapsed_time = time.time() - start_time
+        logger.error(f"Error processing job after {elapsed_time:.2f} seconds: {str(e)}", exc_info=True)
+        # Return 200 to acknowledge receipt (prevents Pub/Sub retries)
+        # This is important for Cloud Run to avoid endless retries that could cause worker timeouts
+        return ("Acknowledged with error", 200)
 
-    # Acknowledge successful processing
-    return ("", 204)
-
-# Optionally, add a health check endpoint
+# Health check endpoint with detailed status information
 @app.route("/health", methods=["GET"])
 def health():
-    return ("OK", 200)
+    try:
+        # Check if OpenAI API key is configured
+        api_key_configured = bool(os.getenv("OPENAI_API_KEY", ""))
+        
+        # Check if SerpAPI key is configured
+        serpapi_configured = bool(os.getenv("SERPAPI_KEY", ""))
+        
+        # Return detailed health status
+        status = {
+            "status": "healthy",
+            "timestamp": int(time.time()),
+            "config": {
+                "openai_api_configured": api_key_configured,
+                "serpapi_configured": serpapi_configured
+            }
+        }
+        logger.info("Health check: Service is healthy")
+        return (json.dumps(status), 200, {"Content-Type": "application/json"})
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return (json.dumps({"status": "unhealthy", "error": str(e)}), 500, {"Content-Type": "application/json"})
 
 # Only needed if running the Flask dev server (Cloud Run uses Gunicorn via Dockerfile)
 if __name__ == "__main__":
