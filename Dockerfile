@@ -32,14 +32,12 @@ ENV PORT=8080
 # Use shell form of CMD to allow environment variable substitution
 # Increase timeout to 120 seconds to prevent worker timeouts during initialization
 # Use preload to load the application once before forking workers
-# Disable check_config to speed up startup
 # Set max-requests to recycle workers periodically
 CMD gunicorn -b 0.0.0.0:${PORT} \
     --workers=1 \
     --threads=8 \
     --timeout=120 \
     --preload \
-    --check-config=False \
     --max-requests=1000 \
     --max-requests-jitter=50 \
     main:app
