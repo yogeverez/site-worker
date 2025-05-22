@@ -4,6 +4,8 @@ import logging
 import asyncio
 import urllib.parse
 import threading
+import functools
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any
 from bs4 import BeautifulSoup
 from google.cloud import firestore
@@ -11,6 +13,35 @@ from google.cloud import firestore
 from site_agents import hero_agent, about_agent, features_agent, translate_text, researcher_agent, ResearchDoc
 from agents import Runner
 from schemas import HeroSection, AboutSection, FeaturesList
+
+# Configure thread-safe event loop handling
+def run_async_in_thread(async_func):
+    """Run an async function in a thread-safe way, handling event loop creation."""
+    @functools.wraps(async_func)
+    def wrapper(*args, **kwargs):
+        # Check if we're in the main thread
+        if threading.current_thread().name == 'MainThread':
+            # In main thread, we can use asyncio.run directly
+            return asyncio.run(async_func(*args, **kwargs))
+        else:
+            # In worker thread, we need to create a new event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(async_func(*args, **kwargs))
+            finally:
+                loop.close()
+    return wrapper
+
+# Wrap the Runner.run method to ensure it works in ThreadPoolExecutor
+async def _run_agent(agent, prompt):
+    """Async function to run an agent with a prompt."""
+    return await Runner.run(agent, prompt)
+
+# Thread-safe function to run an agent
+def run_agent_safely(agent, prompt):
+    """Run an agent in a thread-safe way, handling event loop creation."""
+    return run_async_in_thread(_run_agent)(agent, prompt)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -242,8 +273,8 @@ def do_research(uid: str, timestamp: int | None = None):
             current_thread = threading.current_thread()
             logger.info(f"Running researcher_agent in thread: {current_thread.name}")
             
-            # Use the SDK's built-in synchronous runner
-            result = Runner.run_sync(researcher_agent, prompt)
+            # Use our thread-safe runner function
+            result = run_agent_safely(researcher_agent, prompt)
                 
             docs: List[ResearchDoc] = result.final_output  # already schema-validated
             logger.info(f"Researcher agent found {len(docs)} sources for {uid}")
@@ -384,17 +415,17 @@ def generate_site_content(uid: str, languages: list[str], timestamp: int = None)
         current_thread = threading.current_thread()
         logger.info(f"Running content generation in thread: {current_thread.name}")
         
-        # Run each agent to get structured content using the SDK's built-in synchronous runner
+        # Run each agent to get structured content using our thread-safe runner function
         logger.info(f"Running hero agent for user {uid}")
-        hero_result = Runner.run_sync(hero_agent, user_prompt)
+        hero_result = run_agent_safely(hero_agent, user_prompt)
         hero_data = hero_result.final_output  # HeroSection model instance
         
         logger.info(f"Running about agent for user {uid}")
-        about_result = Runner.run_sync(about_agent, user_prompt)
+        about_result = run_agent_safely(about_agent, user_prompt)
         about_data = about_result.final_output  # AboutSection model
         
         logger.info(f"Running features agent for user {uid}")
-        features_result = Runner.run_sync(features_agent, user_prompt)
+        features_result = run_agent_safely(features_agent, user_prompt)
         features_data = features_result.final_output  # FeaturesList model
 
         # Convert Pydantic model instances to dict for storing
