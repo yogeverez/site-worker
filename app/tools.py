@@ -235,16 +235,16 @@ def do_research(uid: str, timestamp: int | None = None):
         # Call the agent (blocking)
         try:
             logger.info(f"Running researcher_agent for {uid}")
-            result = researcher_agent.run(prompt)          # synchronous call
+            result = Runner.run_sync(researcher_agent, prompt)   # synchronous call
             docs: List[ResearchDoc] = result.final_output  # already schema-validated
             logger.info(f"Researcher agent found {len(docs)} sources for {uid}")
 
-            # Write each ResearchDoc to Firestore
+            # Write each ResearchDoc to Firestore using research/{uid}/sources structure
             db = get_db()
-            coll = db.collection("users").document(uid).collection("research")
+            sources_collection = db.collection("research").document(uid).collection("sources")
             for idx, doc in enumerate(docs, 1):
                 doc_id = f"src{idx:02d}"
-                coll.document(doc_id).set(
+                sources_collection.document(doc_id).set(
                     doc.model_dump() | {"timestamp": timestamp or int(time.time())}
                 )
                 logger.info(f"Saved research doc {doc_id} for {uid}")
@@ -305,12 +305,14 @@ def _legacy_research(uid: str, user_input: dict, timestamp: int | None = None):
             # Use source name; if already used, append a number
             doc_id = source
             # Ensure unique doc_id in case of duplicates
-            existing = db.collection("users").document(uid).collection("research").document(doc_id).get()
+            doc_id = source
+            sources_collection = db.collection("research").document(uid).collection("sources")
+            existing = sources_collection.document(doc_id).get()
             idx = 1
             while existing.exists:
                 idx += 1
                 doc_id = f"{source}{idx}"
-                existing = db.collection("users").document(uid).collection("research").document(doc_id).get()
+                existing = sources_collection.document(doc_id).get()
             # Prepare the document data
             doc_data = {
                 "url": url,
@@ -319,7 +321,9 @@ def _legacy_research(uid: str, user_input: dict, timestamp: int | None = None):
                 "source_type": source,
                 "timestamp": timestamp or int(time.time())
             }
-            db.collection("users").document(uid).collection("research").document(doc_id).set(doc_data)
+            # Store in research/{uid}/sources collection
+            sources_collection = db.collection("research").document(uid).collection("sources")
+            sources_collection.document(doc_id).set(doc_data)
             logger.info(f"Stored research document {doc_id} for user {uid}")
     except Exception as e:
         logger.error(f"Error in legacy research for user {uid}: {e}")
@@ -338,7 +342,9 @@ def generate_site_content(uid: str, languages: list[str], timestamp: int = None)
         logger.info(f"Starting content generation for user {uid} in languages: {languages}")
         # Load research documents for the user
         db = get_db()
-        docs = db.collection("users").document(uid).collection("research").stream()
+        # Get documents from research/{uid}/sources collection
+        sources_collection = db.collection("research").document(uid).collection("sources")
+        docs = sources_collection.stream()
         research_docs = [doc.to_dict() for doc in docs]
         
         # Also include the original input data for completeness
