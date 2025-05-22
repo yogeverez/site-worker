@@ -69,10 +69,10 @@ SERPAPI_API_KEY = os.getenv("SERPAPI_KEY", "")
 def get_site_input(uid: str) -> dict | None:
     """Fetches the siteInputDocument for a given UID from Firestore."""
     db = get_db()
-    doc_ref = db.collection("users").document(uid).collection("sites").document("live")
+    doc_ref = db.collection("siteInputDocuments").document(uid)
     doc = doc_ref.get()
     if doc.exists:
-        return doc.to_dict().get("siteInputDocument")
+        return doc.to_dict()
     return None
 
 # Keep the original fetch_page_content function for backward compatibility
