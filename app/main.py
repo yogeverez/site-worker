@@ -1,6 +1,8 @@
+print("---- PYTHON MAIN.PY STARTING ----", flush=True)
 import os, base64, json, time
 import logging
 import asyncio
+import sys
 from flask import Flask, request
 
 # Import helper modules and OpenAI Agents setup
@@ -10,11 +12,7 @@ from openai import OpenAI
 # In the Docker container, all app/*.py files are in the /app directory, so direct import works.
 from tools import do_research, generate_site_content
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Configure logging (REMOVED basicConfig - let Gunicorn handle it)
 logger = logging.getLogger(__name__)
 
 # OpenAI client will be initialized in each function that needs it
@@ -25,29 +23,39 @@ app = Flask(__name__)
 @app.route("/", methods=["POST"])
 def pubsub_handler():
     """HTTP endpoint for Pub/Sub push messages."""
+    # Explicitly configure logger for this request
+    local_logger = logging.getLogger(f"{__name__}.pubsub_handler")
+    local_logger.handlers.clear() # Clear any existing handlers from previous calls (if any)
+    local_logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler(sys.stderr) # Direct to stderr
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    local_logger.addHandler(handler)
+    local_logger.propagate = False # Prevent messages from being passed to the root logger
+
     start_time = time.time()
-    logger.info("Received Pub/Sub message")
+    local_logger.info("Received Pub/Sub message (attempt 1 via local_logger)")
     
     try:
         envelope = request.get_json(silent=True)
         if not envelope or "message" not in envelope:
-            logger.warning("Bad Request: no Pub/Sub message received")
+            local_logger.warning("Bad Request: no Pub/Sub message received")
             return ("Bad Request: no Pub/Sub message received", 400)
         
         msg = envelope["message"]
-        logger.info(f"Processing message ID: {msg.get('messageId', 'unknown')}")
+        local_logger.info(f"Processing message ID: {msg.get('messageId', 'unknown')}")
 
         # Decode the Pub/Sub message data (which is base64-encoded)
         data = msg.get("data")
         if data:
             try:
                 payload = json.loads(base64.b64decode(data).decode("utf-8"))
-                logger.info(f"Successfully decoded message payload")
+                local_logger.info(f"Successfully decoded message payload")
             except Exception as e:
-                logger.error(f"Failed to decode message data: {e}")
+                local_logger.error(f"Failed to decode message data: {e}")
                 return ("Bad Request: invalid message data", 400)
         else:
-            logger.warning("No data in message payload")
+            local_logger.warning("No data in message payload")
             payload = {}
 
         # Extract job parameters
@@ -56,59 +64,43 @@ def pubsub_handler():
         languages = payload.get("languages", [])
         timestamp = payload.get("timestamp")  # Unix timestamp
 
-        logger.info(f"Job parameters - UID: {uid}, Mode: {mode}, Languages: {languages}")
+        local_logger.info(f"Job parameters - UID: {uid}, Mode: {mode}, Languages: {languages}")
 
-        # Detailed boolean checks for debugging
         check_not_uid = not uid
-        check_not_mode = not mode
-        check_not_languages = not languages
-        # Ensure mode and languages are treated as potentially None before boolean negation for clarity in logs
+
         actual_mode_for_check = mode if mode is not None else ''
         actual_languages_for_check = languages if languages is not None else []
         
         check_not_actual_mode = not actual_mode_for_check
         check_not_actual_languages = not actual_languages_for_check
 
-        check_inner_condition = (check_not_actual_mode and check_not_actual_languages)
-        check_full_condition = check_not_uid or check_inner_condition
-
-        logger.info(f"DEBUG: uid='{uid}', mode='{mode}', languages={languages}")
-        logger.info(f"DEBUG: not uid -> {check_not_uid}")
-        logger.info(f"DEBUG: mode for check='{actual_mode_for_check}', not mode -> {check_not_actual_mode}")
-        logger.info(f"DEBUG: languages for check={actual_languages_for_check}, not languages -> {check_not_actual_languages}")
-        logger.info(f"DEBUG: (not mode AND not languages) -> {check_inner_condition}")
-        logger.info(f"DEBUG: FINAL_CONDITION (not uid OR (not mode AND not languages)) -> {check_full_condition}")
-
-        if check_full_condition:
-            logger.warning(f"Missing required parameters - UID: {uid}, Mode: {mode}, Languages: {languages}")
+        # Check if essential parameters are missing
+        final_condition = check_not_uid or (check_not_actual_mode and check_not_actual_languages)
+        
+        if final_condition: # Using the debugged condition
+            local_logger.warning(f"Missing required parameters: uid='{uid}', mode='{mode}', languages='{languages}'")
             return ("Bad Request: missing uid/mode/languages", 400)
 
         # Process according to mode
         if mode in ("research", "full"):
             # Perform web research and store results in Firestore
-            logger.info(f"Starting research mode for user {uid}")
-            asyncio.run(do_research(uid, timestamp=timestamp))
-            logger.info(f"Completed research mode for user {uid}")
+            local_logger.info(f"Starting research mode for user {uid}")
+            asyncio.run(do_research(uid, timestamp=timestamp, parent_logger=local_logger))
+            local_logger.info(f"Completed research mode for user {uid}")
             
         if mode in ("generate", "full"):
             # Generate site content (and translations) using research data
-            logger.info(f"Starting content generation for user {uid} in languages: {languages}")
-            asyncio.run(generate_site_content(uid, languages, timestamp=timestamp))
-            logger.info(f"Completed content generation for user {uid}")
+            local_logger.info(f"Starting content generation for user {uid} in languages: {languages}")
+            asyncio.run(generate_site_content(uid, languages, timestamp=timestamp, parent_logger=local_logger))
+            local_logger.info(f"Completed content generation for user {uid}")
 
         elapsed_time = time.time() - start_time
-        logger.info(f"Job completed successfully in {elapsed_time:.2f} seconds")
+        local_logger.info(f"Job completed successfully in {elapsed_time:.2f} seconds")
         
-        # Acknowledge successful processing
         return ("", 204)
-        
     except Exception as e:
-        # Log the error with full traceback
-        elapsed_time = time.time() - start_time
-        logger.error(f"Error processing job after {elapsed_time:.2f} seconds: {str(e)}", exc_info=True)
-        # Return 200 to acknowledge receipt (prevents Pub/Sub retries)
-        # This is important for Cloud Run to avoid endless retries that could cause worker timeouts
-        return ("Acknowledged with error", 200)
+        local_logger.error(f"Unhandled error processing Pub/Sub message: {e}", exc_info=True)
+        return ("Internal Server Error", 500)
 
 # Health check endpoint with detailed status information
 @app.route("/health", methods=["GET"])

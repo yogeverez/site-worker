@@ -40,4 +40,7 @@ CMD gunicorn -b 0.0.0.0:${PORT} \
     --preload \
     --max-requests=1000 \
     --max-requests-jitter=50 \
+    --log-level=info \
+    --error-logfile - \
+    --enable-stdio-inheritance \
     main:app

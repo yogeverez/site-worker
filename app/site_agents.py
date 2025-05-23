@@ -3,7 +3,7 @@ from __future__ import annotations
 import os, re, requests, urllib.parse
 import openai
 from openai import RateLimitError, APIStatusError # Import for error handling
-from agents import Agent, function_tool
+from agents import Agent, function_tool, ModelSettings # Ensure ModelSettings is explicitly imported
 from schemas import (
     HeroSection, AboutSection, FeaturesList,  # content schemas
     ResearchDoc                               # NEW – research schema
@@ -32,7 +32,7 @@ def get_hero_agent() -> Agent:
         instructions=hero_instructions,
         model="gpt-4o-mini",
         output_type=HeroSection,
-        model_settings={"max_retries": 0} # Pass model_settings instead of llm client
+        model_settings=ModelSettings() # Use ModelSettings class
     )
 
 def get_about_agent() -> Agent:
@@ -45,7 +45,7 @@ def get_about_agent() -> Agent:
         instructions=about_instructions,
         model="gpt-4o-mini",
         output_type=AboutSection,
-        model_settings={"max_retries": 0} # Pass model_settings instead of llm client
+        model_settings=ModelSettings() # Use ModelSettings class
     )
 
 def get_features_agent() -> Agent:
@@ -59,7 +59,7 @@ def get_features_agent() -> Agent:
         instructions=features_instructions,
         model="gpt-4o-mini",
         output_type=FeaturesList,
-        model_settings={"max_retries": 0} # Pass model_settings instead of llm client
+        model_settings=ModelSettings() # Use ModelSettings class
     )
 
 # ---------------------------------------------------------------------
@@ -138,7 +138,7 @@ Follow these steps carefully:
             agent_web_search, # Assuming agent_web_search does not require the client directly
         ],
         output_type=List[ResearchDoc],
-        model_settings={"max_retries": 0} # Pass model_settings instead of llm client
+        model_settings=ModelSettings() # Use ModelSettings class
     )
 
 # ---------------------------------------------------------------------

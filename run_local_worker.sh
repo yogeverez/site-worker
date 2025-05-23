@@ -11,7 +11,7 @@ SERVICE_ACCOUNT_KEY_RELATIVE_PATH="app/gcp_service_account_key.json"
 # Path to the Dockerfile, relative to this script's directory
 DOCKERFILE_PATH="."
 
-START_PORT=8090
+START_PORT=8110
 MAX_PORT_ATTEMPTS=20 # Try up to 20 ports
 
 # --- Helper Functions ---

@@ -12,6 +12,7 @@ SERPAPI_API_KEY = os.getenv("SERPAPI_KEY", "")
 
 def search_web(query: str, num_results: int = 5) -> List[Dict[str, str]]:
     """Use SerpAPI to search the web and return a list of result dicts (title, link, snippet)."""
+    time.sleep(2) # Add a delay before each search operation
     if not SERPAPI_API_KEY:
         logger.warning("SerpAPI key not configured, returning empty results")
         return []

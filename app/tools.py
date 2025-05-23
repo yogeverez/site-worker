@@ -7,7 +7,7 @@ import threading
 import functools
 import json
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from bs4 import BeautifulSoup
 from google.cloud import firestore
 from pydantic import TypeAdapter, ValidationError
@@ -22,7 +22,7 @@ from site_agents import (
 from agents import Runner
 from schemas import HeroSection, AboutSection, FeaturesList
 from search_utils import search_web
-
+import datetime # Moved here
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -97,7 +97,11 @@ def fetch_page_content(url: str) -> tuple[str, str]:
     return (title, content)
 
 import openai # Added for OpenAI client
-from firebase_admin import firestore
+from firebase_admin import credentials, initialize_app, firestore
+# Corrected import path for Timestamp
+from google.api_core.datetime_helpers import DatetimeWithNanoseconds # For explicit type checking
+# Corrected import based on openai-agents PyPI page
+from agents import Runner 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from site_agents import (
@@ -113,8 +117,9 @@ def get_openai_client():
         raise ValueError("OPENAI_API_KEY not set")
     return openai.OpenAI(api_key=api_key, max_retries=0) # Set max_retries=0
 
-async def _generate_search_queries(user_input: dict, client: openai.OpenAI, max_queries: int = 5) -> List[str]:
+async def _generate_search_queries(user_input: dict, client: openai.OpenAI, max_queries: int = 5, parent_logger: Optional[logging.Logger] = None) -> List[str]:
     """Generates a list of search queries based on user input using an LLM call."""
+    current_logger = parent_logger or logger
     name = user_input.get("name", "")
     title = user_input.get("title") or user_input.get("job_title", "")
     bio = user_input.get("bio", "")
@@ -141,7 +146,7 @@ async def _generate_search_queries(user_input: dict, client: openai.OpenAI, max_
     )
 
     try:
-        logger.info(f"Generating search queries for: {name}")
+        current_logger.info(f"Generating search queries for: {name}")
         completion = await asyncio.to_thread(
             client.chat.completions.create,
             model="gpt-4o-mini",
@@ -164,73 +169,79 @@ async def _generate_search_queries(user_input: dict, client: openai.OpenAI, max_
                 elif isinstance(data, dict) and 'queries' in data and isinstance(data['queries'], list):
                     queries = data['queries']
                 else:
-                    logger.error(f"LLM returned unexpected JSON structure for queries: {response_content}")
+                    current_logger.error(f"LLM returned unexpected JSON structure for queries: {response_content}")
                     queries = [] # Fallback to empty list
 
                 # Ensure all items are strings
                 queries = [str(q) for q in queries if isinstance(q, str)]
-                logger.info(f"Generated {len(queries)} search queries: {queries}")
+                current_logger.info(f"Generated {len(queries)} search queries: {queries}")
                 return queries[:max_queries] # Ensure we don't exceed max_queries
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse JSON response for search queries: {e}. Response: {response_content}")
+                current_logger.error(f"Failed to parse JSON response for search queries: {e}. Response: {response_content}")
                 return [] # Fallback to empty list if JSON parsing fails
         else:
-            logger.error("LLM returned no content for search queries.")
+            current_logger.error("LLM returned no content for search queries.")
             return [] # Fallback to empty list
     except openai.RateLimitError as e:
-        logger.error(f"OpenAI API rate limit exceeded while generating search queries: {e}")
+        current_logger.error(f"OpenAI API rate limit exceeded while generating search queries: {e}")
         return []
     except openai.APIStatusError as e:
-        logger.error(f"OpenAI API status error while generating search queries: {e}")
+        current_logger.error(f"OpenAI API status error while generating search queries: {e}")
         return []
     except Exception as e:
-        logger.error(f"Error generating search queries with LLM: {e}", exc_info=True)
+        current_logger.error(f"Error generating search queries with LLM: {e}", exc_info=True)
         return [] # Fallback to empty list
 
 
-async def run_agent_safely(agent: Any, prompt: str, **kwargs) -> Any:
+async def run_agent_safely(agent: Any, prompt: str, parent_logger: Optional[logging.Logger] = None, **kwargs) -> Any:
     """Runs an agent with comprehensive error handling for OpenAI API errors."""
+    current_logger = parent_logger or logger
     try:
-        # Assuming Runner.run is an async function based on previous context
-        logger.info(f"Running agent '{agent.name if hasattr(agent, 'name') else 'UnknownAgent'}'...")
-        result = await Runner.run(agent=agent, prompt=prompt, **kwargs)
-        logger.info(f"Agent '{agent.name if hasattr(agent, 'name') else 'UnknownAgent'}' completed successfully.")
+        current_logger.info(f"Running agent '{agent.name if hasattr(agent, 'name') else 'UnknownAgent'}'...")
+        
+        # Instantiate Runner without arguments
+        runner_instance = Runner()
+        
+        # Call run method on the instance, passing agent and prompt positionally
+        result = await runner_instance.run(agent, prompt, **kwargs)
+        
+        current_logger.info(f"Agent '{agent.name if hasattr(agent, 'name') else 'UnknownAgent'}' completed successfully.")
         return result
     except openai.RateLimitError as rle: # Explicitly qualify openai.RateLimitError
         agent_name = agent.name if hasattr(agent, 'name') else 'UnknownAgent'
-        logger.error(f"OpenAI API rate limit EXCEEDED during run of agent '{agent_name}'. Error: {rle}")
+        current_logger.error(f"OpenAI API rate limit EXCEEDED during run of agent '{agent_name}'. Error: {rle}")
         return None # Indicate failure due to rate limit
     except openai.APIStatusError as apise: # Explicitly qualify openai.APIStatusError
         agent_name = agent.name if hasattr(agent, 'name') else 'UnknownAgent'
-        logger.error(f"OpenAI API status error during run of agent '{agent_name}'. Error: {apise}")
+        current_logger.error(f"OpenAI API status error during run of agent '{agent_name}'. Error: {apise}")
         return None # Indicate failure due to API status error
     except Exception as e_general:
         agent_name = agent.name if hasattr(agent, 'name') else 'UnknownAgent'
         error_type_name = type(e_general).__name__
         # Log with exc_info=True to get the full traceback for this unexpected catch
-        logger.error(f"Unexpected error ({error_type_name}) during run of agent '{agent_name}'. Error: {e_general}", exc_info=True)
+        current_logger.error(f"Unexpected error ({error_type_name}) during run of agent '{agent_name}'. Error: {e_general}", exc_info=True)
         
         # Detailed debugging for RateLimitError and APIStatusError type matching
         if error_type_name == 'RateLimitError' or isinstance(e_general, openai.RateLimitError):
-            logger.error(f"DEBUG: General handler in run_agent_safely caught something that might be RateLimitError for agent '{agent_name}'.")
-            logger.error(f"DEBUG: id(openai.RateLimitError) in this scope: {id(openai.RateLimitError)}")
-            logger.error(f"DEBUG: id(type(e_general)) of caught exception: {id(type(e_general))}")
-            logger.error(f"DEBUG: type(e_general) is openai.RateLimitError: {type(e_general) is openai.RateLimitError}")
-            logger.error(f"DEBUG: isinstance(e_general, openai.RateLimitError): {isinstance(e_general, openai.RateLimitError)}")
+            current_logger.error(f"DEBUG: General handler in run_agent_safely caught something that might be RateLimitError for agent '{agent_name}'.")
+            current_logger.error(f"DEBUG: id(openai.RateLimitError) in this scope: {id(openai.RateLimitError)}")
+            current_logger.error(f"DEBUG: id(type(e_general)) of caught exception: {id(type(e_general))}")
+            current_logger.error(f"DEBUG: type(e_general) is openai.RateLimitError: {type(e_general) is openai.RateLimitError}")
+            current_logger.error(f"DEBUG: isinstance(e_general, openai.RateLimitError): {isinstance(e_general, openai.RateLimitError)}")
             if type(e_general) is openai.RateLimitError or isinstance(e_general, openai.RateLimitError):
-                logger.error(f"CRITICAL: openai.RateLimitError was caught by the GENERAL Exception block in run_agent_safely for agent '{agent_name}'. Specific handler failed.")
+                current_logger.error(f"CRITICAL: openai.RateLimitError was caught by the GENERAL Exception block in run_agent_safely for agent '{agent_name}'. Specific handler failed.")
         elif error_type_name == 'APIStatusError' or isinstance(e_general, openai.APIStatusError):
-            logger.error(f"DEBUG: General handler in run_agent_safely caught something that might be APIStatusError for agent '{agent_name}'.")
-            logger.error(f"DEBUG: id(openai.APIStatusError) in this scope: {id(openai.APIStatusError)}")
-            logger.error(f"DEBUG: id(type(e_general)) of caught exception: {id(type(e_general))}")
-            logger.error(f"DEBUG: type(e_general) is openai.APIStatusError: {type(e_general) is openai.APIStatusError}")
-            logger.error(f"DEBUG: isinstance(e_general, openai.APIStatusError): {isinstance(e_general, openai.APIStatusError)}")
+            current_logger.error(f"DEBUG: General handler in run_agent_safely caught something that might be APIStatusError for agent '{agent_name}'.")
+            current_logger.error(f"DEBUG: id(openai.APIStatusError) in this scope: {id(openai.APIStatusError)}")
+            current_logger.error(f"DEBUG: id(type(e_general)) of caught exception: {id(type(e_general))}")
+            current_logger.error(f"DEBUG: type(e_general) is openai.APIStatusError: {type(e_general) is openai.APIStatusError}")
+            current_logger.error(f"DEBUG: isinstance(e_general, openai.APIStatusError): {isinstance(e_general, openai.APIStatusError)}")
             if type(e_general) is openai.APIStatusError or isinstance(e_general, openai.APIStatusError):
-                logger.error(f"CRITICAL: openai.APIStatusError was caught by the GENERAL Exception block in run_agent_safely for agent '{agent_name}'. Specific handler failed.")
+                current_logger.error(f"CRITICAL: openai.APIStatusError was caught by the GENERAL Exception block in run_agent_safely for agent '{agent_name}'. Specific handler failed.")
         return None # Indicate general failure
 
 
-async def do_research(uid: str, timestamp: int | None = None):
+async def do_research(uid: str, timestamp: int | None = None, parent_logger: Optional[logging.Logger] = None):
     """
     Perform research using researcher_agent.
     1. Generates search queries based on user input.
@@ -240,19 +251,20 @@ async def do_research(uid: str, timestamp: int | None = None):
     Stores docs at research/{uid}/sources/{docId}
     Stores manifest at research/{uid}/summary/manifest.json
     """
+    current_logger = parent_logger or logger
     try:
-        logger.info(f"Starting research for user {uid}")
+        current_logger.info(f"Starting research for user {uid}")
         
         # Get OpenAI client
         try:
             oai_client = get_openai_client()
         except ValueError as e:
-            logger.error(f"Failed to get OpenAI client for research: {e}")
+            current_logger.error(f"Failed to get OpenAI client for research: {e}")
             return
 
         site_input = get_site_input(uid)
         if not site_input:
-            logger.warning(f"No site input found for user {uid}. Skipping research.")
+            current_logger.warning(f"No site input found for user {uid}. Skipping research.")
             return
 
         # Generate search queries
@@ -268,56 +280,55 @@ async def do_research(uid: str, timestamp: int | None = None):
             "company_description": company_details.get("description", "")
         }
 
-        search_queries = await _generate_search_queries(user_profile_for_query_gen, oai_client)
+        search_queries = await _generate_search_queries(user_profile_for_query_gen, oai_client, max_queries=2, parent_logger=current_logger)
 
         if not search_queries:
-            logger.warning(f"No search queries generated for user {uid}. Skipping researcher agent run.")
+            current_logger.warning(f"No search queries generated for user {uid}. Skipping researcher agent run.")
             # Optionally, still create an empty manifest or a manifest indicating no research was done
             # For now, just returning.
             return
 
-        logger.info(f"Generated {len(search_queries)} search queries for user {uid}: {search_queries}")
+        current_logger.info(f"Generated {len(search_queries)} search queries for user {uid}: {search_queries}")
 
-        # Prepare prompt for researcher_agent
-        researcher_prompt = (
-            f"Conduct research based on the following profile and queries:\n"
-            f"Profile Summary:\nName: {site_input.get('name', 'N/A')}\nTitle: {site_input.get('title', 'N/A')}\n"
-            f"Search Queries: {json.dumps(search_queries)}\n"
-            f"Please find and return all relevant sources."
-        )
-        
-        researcher_agent_instance = get_researcher_agent() # Removed client argument
-        
-        logger.info(f"Running researcher agent for user {uid} with {len(search_queries)} queries.")
-        # Pass context if your Agent/Runner setup uses it, e.g., context={"uid": uid}
-        # For now, assuming no specific context object is needed beyond what agent might self-manage or get via prompt
-        agent_results = await run_agent_safely(researcher_agent_instance, researcher_prompt)
+        research_docs: List[ResearchDoc] = [] # Initialize as empty
+        BYPASS_RESEARCH_DUE_TO_SERPAPI_CREDITS = True # Set to False to re-enable research
 
-        if agent_results is None:
-            logger.error(f"Researcher agent failed or returned no results for user {uid}. Research incomplete.")
-            # Decide if an empty/error manifest should be written
-            return
-        
-        if not isinstance(agent_results, list):
-            logger.error(f"Researcher agent returned an unexpected type: {type(agent_results)}. Expected list. UID: {uid}")
-            return
+        if BYPASS_RESEARCH_DUE_TO_SERPAPI_CREDITS:
+            current_logger.warning("TEMPORARY BYPASS: Skipping research agent execution (SerpAPI calls) due to exhausted credits. Proceeding with empty research results.")
+        else:
+            # Original research execution logic
+            researcher_prompt = (
+                f"Conduct research based on the following profile and queries:\n"
+                f"Profile Summary:\nName: {site_input.get('name', 'N/A')}\nTitle: {site_input.get('title', 'N/A')}\n"
+                f"Search Queries: {json.dumps(search_queries)}\n"
+                f"Please find and return all relevant sources."
+            )
+            
+            researcher_agent_instance = get_researcher_agent() # Removed client argument
+            
+            current_logger.info(f"Running researcher agent for user {uid} with {len(search_queries)} queries.")
+            agent_results = await run_agent_safely(researcher_agent_instance, researcher_prompt, parent_logger=current_logger)
 
-        # Validate and save research documents
-        research_docs: List[ResearchDoc] = []
-        try:
-            # Use TypeAdapter for validating a list of Pydantic models
-            adapter = TypeAdapter(List[ResearchDoc])
-            research_docs = adapter.validate_python(agent_results)
-        except ValidationError as e:
-            logger.error(f"Validation error for research documents for user {uid}: {e}. Results: {agent_results}")
-            # Decide if an error manifest should be written or just return
-            return
-        
+            if agent_results is None:
+                current_logger.error(f"Researcher agent failed or returned no results for user {uid}. Research incomplete.")
+                # research_docs remains empty, manifest will reflect this
+            elif not isinstance(agent_results, list):
+                current_logger.error(f"Researcher agent returned an unexpected type: {type(agent_results)}. Expected list. UID: {uid}")
+                # research_docs remains empty, manifest will reflect this
+            else:
+                try:
+                    adapter = TypeAdapter(List[ResearchDoc])
+                    research_docs = adapter.validate_python(agent_results) # Populate research_docs here
+                except ValidationError as e:
+                    current_logger.error(f"Validation error for research documents for user {uid}: {e}. Results: {agent_results}")
+                    # research_docs remains empty if validation fails
+
+        # Common logic continues here using the 'research_docs' list (which is empty if bypassed or if agent/validation failed in the 'else' block)
         if not research_docs:
-            logger.info(f"No research documents were found or validated for user {uid}.")
+            current_logger.info(f"No research documents were found or validated for user {uid}.")
             # Create a manifest indicating no results, then return
         else:
-            logger.info(f"Successfully retrieved and validated {len(research_docs)} research documents for user {uid}.")
+            current_logger.info(f"Successfully retrieved and validated {len(research_docs)} research documents for user {uid}.")
 
         db = get_db()
         batch = db.batch()
@@ -334,9 +345,9 @@ async def do_research(uid: str, timestamp: int | None = None):
                 source_doc_ref = user_research_col_ref.document()
                 source_doc_ref.set(research_doc.model_dump())
                 source_refs.append(source_doc_ref)
-                logger.info(f"  Saved source {i+1}/{len(research_docs)}: '{research_doc.title}' to {source_doc_ref.path}")
+                current_logger.info(f"  Saved source {i+1}/{len(research_docs)}: '{research_doc.title}' to {source_doc_ref.path}")
             except Exception as e:
-                logger.error(f"Error saving ResearchDoc '{research_doc.title}' to Firestore: {e}", exc_info=True)
+                current_logger.error(f"Error saving ResearchDoc '{research_doc.title}' to Firestore: {e}", exc_info=True)
         
         # 4. Create a manifest file
         manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
@@ -358,10 +369,10 @@ async def do_research(uid: str, timestamp: int | None = None):
             manifest_data["status"] = "completed_save_errors"
 
         manifest_ref.set(manifest_data)
-        logger.info(f"Research manifest created/updated for user {uid} at {manifest_ref.path} with status: {manifest_data['status']}")
+        current_logger.info(f"Research manifest created/updated for user {uid} at {manifest_ref.path} with status: {manifest_data['status']}")
 
     except Exception as e:
-        logger.error(f"Overall error in do_research for user {uid}: {e}", exc_info=True)
+        current_logger.error(f"Overall error in do_research for user {uid}: {e}", exc_info=True)
         # Attempt to save an error manifest if a critical error occurs early
         try:
             db = get_db()
@@ -381,30 +392,47 @@ async def do_research(uid: str, timestamp: int | None = None):
                     "saved_source_ids": locals().get('source_refs', [])
                 }
                 manifest_ref.set(error_manifest_data, merge=True) # Merge to avoid losing partial data if any
-                logger.info(f"Error manifest created/updated for user {uid} at {manifest_ref.path}")
+                current_logger.info(f"Error manifest created/updated for user {uid} at {manifest_ref.path}")
         except Exception as manifest_e:
-            logger.error(f"Failed to save error manifest for user {uid}: {manifest_e}", exc_info=True)
+            current_logger.error(f"Failed to save error manifest for user {uid}: {manifest_e}", exc_info=True)
 
-async def generate_site_content(uid: str, languages: List[str], timestamp: int | None = None):
+def convert_firestore_timestamps(data: Any) -> Any:
+    """
+    Recursively converts Firestore Timestamp objects (specifically datetime.datetime
+    and DatetimeWithNanoseconds) in a data structure to ISO 8601 formatted strings.
+    """
+    if isinstance(data, DatetimeWithNanoseconds) or isinstance(data, datetime.datetime):
+        dt_object = data # data is already a datetime-like object
+        if dt_object.tzinfo is None or dt_object.tzinfo.utcoffset(dt_object) is None:
+            dt_object = dt_object.replace(tzinfo=datetime.timezone.utc)
+        return dt_object.isoformat()
+    elif isinstance(data, dict):
+        return {k: convert_firestore_timestamps(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [convert_firestore_timestamps(item) for item in data]
+    return data
+
+async def generate_site_content(uid: str, languages: List[str], timestamp: int | None = None, parent_logger: Optional[logging.Logger] = None):
     """Generates site content using various agents and stores it in Firestore."""
+    current_logger = parent_logger or logger
     try:
-        logger.info(f"Starting site content generation for user {uid}, languages: {languages}")
+        current_logger.info(f"Starting site content generation for user {uid}, languages: {languages}")
         
         # Get OpenAI client
         try:
             oai_client = get_openai_client()
         except ValueError as e:
-            logger.error(f"Failed to get OpenAI client for content generation: {e}")
+            current_logger.error(f"Failed to get OpenAI client for content generation: {e}")
             return
 
         site_input = get_site_input(uid)
         if not site_input:
-            logger.warning(f"No site input found for user {uid}. Skipping content generation.")
+            current_logger.warning(f"No site input found for user {uid}. Skipping content generation.")
             return
 
-        # Prepare a base prompt from site_input
-        # This can be customized for each agent if needed
-        base_prompt = json.dumps(site_input) 
+        # Convert Firestore timestamps before serializing to JSON
+        serializable_site_input = convert_firestore_timestamps(site_input)
+        base_prompt = json.dumps(serializable_site_input)
 
         # Initialize agents
         hero_agent_instance = get_hero_agent()
@@ -415,34 +443,34 @@ async def generate_site_content(uid: str, languages: List[str], timestamp: int |
         generated_content = {}
 
         # Hero Section
-        logger.info(f"Generating Hero section for {uid}...")
-        hero_data = await run_agent_safely(hero_agent_instance, base_prompt)
-        if hero_data and isinstance(hero_data, HeroSection):
-            generated_content["hero"] = hero_data.model_dump()
-            logger.info(f"Hero section generated for {uid}.")
+        current_logger.info(f"Generating Hero section for {uid}...")
+        hero_run_result = await run_agent_safely(hero_agent_instance, base_prompt, parent_logger=current_logger)
+        if hero_run_result and hero_run_result.final_output and isinstance(hero_run_result.final_output, HeroSection):
+            generated_content["hero"] = hero_run_result.final_output.model_dump()
+            current_logger.info(f"Hero section generated for {uid}.")
         else:
-            logger.error(f"Failed to generate Hero section for {uid}. Agent returned: {hero_data}")
+            current_logger.error(f"Failed to generate Hero section for {uid}. Agent run result: {hero_run_result}")
 
         # About Section
-        logger.info(f"Generating About section for {uid}...")
-        about_data = await run_agent_safely(about_agent_instance, base_prompt)
-        if about_data and isinstance(about_data, AboutSection):
-            generated_content["about"] = about_data.model_dump()
-            logger.info(f"About section generated for {uid}.")
+        current_logger.info(f"Generating About section for {uid}...")
+        about_run_result = await run_agent_safely(about_agent_instance, base_prompt, parent_logger=current_logger)
+        if about_run_result and about_run_result.final_output and isinstance(about_run_result.final_output, AboutSection):
+            generated_content["about"] = about_run_result.final_output.model_dump()
+            current_logger.info(f"About section generated for {uid}.")
         else:
-            logger.error(f"Failed to generate About section for {uid}. Agent returned: {about_data}")
+            current_logger.error(f"Failed to generate About section for {uid}. Agent run result: {about_run_result}")
 
         # Features Section
-        logger.info(f"Generating Features section for {uid}...")
-        features_data = await run_agent_safely(features_agent_instance, base_prompt)
-        if features_data and isinstance(features_data, FeaturesList):
-            generated_content["features"] = features_data.model_dump()
-            logger.info(f"Features section generated for {uid}.")
+        current_logger.info(f"Generating Features section for {uid}...")
+        features_run_result = await run_agent_safely(features_agent_instance, base_prompt, parent_logger=current_logger)
+        if features_run_result and features_run_result.final_output and isinstance(features_run_result.final_output, FeaturesList):
+            generated_content["features"] = features_run_result.final_output.model_dump()
+            current_logger.info(f"Features section generated for {uid}.")
         else:
-            logger.error(f"Failed to generate Features section for {uid}. Agent returned: {features_data}")
+            current_logger.error(f"Failed to generate Features section for {uid}. Agent run result: {features_run_result}")
 
         if not generated_content:
-            logger.error(f"No content was generated for user {uid}. Skipping save and translation.")
+            current_logger.error(f"No content was generated for user {uid}. Skipping save and translation.")
             return
 
         # Save original content to Firestore
@@ -463,36 +491,36 @@ async def generate_site_content(uid: str, languages: List[str], timestamp: int |
 
         # Update the document, merging with existing data
         site_doc_ref.set(update_data, merge=True) # Use set with merge=True to update or create if not exists
-        logger.info(f"Saved original generated content for user {uid} to Firestore.")
+        current_logger.info(f"Saved original generated content for user {uid} to Firestore.")
 
         # --- Translations ---
         if languages and generated_content: # Only translate if languages are specified and original content exists
-            logger.info(f"Starting translations for user {uid} into languages: {languages}")
+            current_logger.info(f"Starting translations for user {uid} into languages: {languages}")
             translated_site_content = {}
 
             for lang in languages:
                 if lang.lower() == "en" or lang.lower() == "english": # Skip if target is English (already original)
-                    logger.info(f"Skipping translation to English for user {uid} as it's the original language.")
+                    current_logger.info(f"Skipping translation to English for user {uid} as it's the original language.")
                     # Optionally, copy 'original' to 'en' if strict structure is needed
                     # translated_site_content[lang] = generated_content 
                     continue
 
-                logger.info(f"Translating content to {lang} for user {uid}...")
+                current_logger.info(f"Translating content to {lang} for user {uid}...")
                 current_lang_translations = {}
                 for section, content_item in generated_content.items():
                     if not content_item: # Skip if original content for this section is missing
-                        logger.warning(f"Skipping translation of section '{section}' to {lang} for {uid} due to missing original content.")
+                        current_logger.warning(f"Skipping translation of section '{section}' to {lang} for {uid} due to missing original content.")
                         continue
                     
                     translated_section = {}
                     for key, value in content_item.items():
                         if isinstance(value, str) and value.strip():
                             # translated_text is now async, ensure oai_client is passed
-                            translated_value = await translate_text(text=value, target_language=lang)
+                            translated_value = await translate_text(text=value, target_language=lang, parent_logger=current_logger)
                             if translated_value and "Error: Translation failed" not in translated_value:
                                 translated_section[key] = translated_value
                             else:
-                                logger.error(f"Translation failed for text in section '{section}', key '{key}' to {lang} for {uid}. Details: {translated_value}")
+                                current_logger.error(f"Translation failed for text in section '{section}', key '{key}' to {lang} for {uid}. Details: {translated_value}")
                                 translated_section[key] = value # Fallback to original value
                         elif isinstance(value, list):
                             # Handle lists (e.g., features in FeaturesList)
@@ -503,11 +531,11 @@ async def generate_site_content(uid: str, languages: List[str], timestamp: int |
                                     for item_key, item_value in item.items():
                                         if isinstance(item_value, str) and item_value.strip():
                                             # translated_text is now async
-                                            translated_list_value = await translate_text(text=item_value, target_language=lang)
+                                            translated_list_value = await translate_text(text=item_value, target_language=lang, parent_logger=current_logger)
                                             if translated_list_value and "Error: Translation failed" not in translated_list_value:
                                                 translated_item_dict[item_key] = translated_list_value
                                             else:
-                                                logger.error(f"Translation failed for list item in section '{section}', key '{item_key}' to {lang} for {uid}. Details: {translated_list_value}")
+                                                current_logger.error(f"Translation failed for list item in section '{section}', key '{item_key}' to {lang} for {uid}. Details: {translated_list_value}")
                                                 translated_item_dict[item_key] = item_value # Fallback
                                         else:
                                             translated_item_dict[item_key] = item_value # Non-string or empty string
@@ -521,9 +549,9 @@ async def generate_site_content(uid: str, languages: List[str], timestamp: int |
                 
                 if current_lang_translations: # Only add if some translations were made for this language
                     translated_site_content[lang] = current_lang_translations
-                    logger.info(f"Completed translations to {lang} for user {uid}.")
+                    current_logger.info(f"Completed translations to {lang} for user {uid}.")
                 else:
-                    logger.warning(f"No content was translated to {lang} for user {uid}, possibly due to errors or empty original sections.")
+                    current_logger.warning(f"No content was translated to {lang} for user {uid}, possibly due to errors or empty original sections.")
 
             if translated_site_content:
                 # Save translations to Firestore
@@ -535,16 +563,16 @@ async def generate_site_content(uid: str, languages: List[str], timestamp: int |
                     "lastUpdated": firestore.SERVER_TIMESTAMP
                 }
                 site_doc_ref.set(translation_update_data, merge=True)
-                logger.info(f"Saved translated content for user {uid} to Firestore.")
+                current_logger.info(f"Saved translated content for user {uid} to Firestore.")
             else:
-                logger.info(f"No translations were generated or saved for user {uid}.")
+                current_logger.info(f"No translations were generated or saved for user {uid}.")
         else:
-            logger.info(f"No languages specified or no original content to translate for user {uid}.")
+            current_logger.info(f"No languages specified or no original content to translate for user {uid}.")
 
-        logger.info(f"Site content generation and translation (if any) completed for user {uid}.")
+        current_logger.info(f"Site content generation and translation (if any) completed for user {uid}.")
 
     except Exception as e:
-        logger.error(f"Error during site content generation for user {uid}: {e}", exc_info=True)
+        current_logger.error(f"Error during site content generation for user {uid}: {e}", exc_info=True)
         # Update status to reflect error if possible, but avoid new exceptions here
         try:
             db = get_db()
@@ -556,4 +584,4 @@ async def generate_site_content(uid: str, languages: List[str], timestamp: int |
             }
             site_doc_ref.set(error_update_data, merge=True)
         except Exception as db_error:
-            logger.error(f"Failed to update Firestore with error status for user {uid}: {db_error}")
+            current_logger.error(f"Failed to update Firestore with error status for user {uid}: {db_error}")
