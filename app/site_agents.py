@@ -3,15 +3,16 @@ from __future__ import annotations
 import os, re, requests, urllib.parse
 import openai
 from openai import RateLimitError, APIStatusError
-from agents import Agent, function_tool, ModelSettings
+from agents import Agent, function_tool, ModelSettings, AgentOutputSchema, WebSearchTool
 from schemas import (
     HeroSection, AboutSection, FeaturesList,
     ResearchDoc, EnhancedResearchDoc, UserProfileData
 )
 from typing import Any, List, Optional
-from agent_tool_impl import agent_web_search, agent_fetch_url, agent_strip_html
 import logging
 import time
+from agent_tool_impl import agent_fetch_url, agent_strip_html
+from agent_research_tools import research_and_save_url, research_search_results
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -184,67 +185,55 @@ ROLE & GOAL:
 You are tasked with gathering factual, verifiable information about a person from public sources. Your research will ground the content generation in real data, following retrieval-augmented generation principles to minimize hallucinations and maximize accuracy.
 
 AVAILABLE TOOLS:
-• agent_web_search(query, k): Search the web and return top-k results with title, URL, and snippet
+• WebSearchTool: Search the web and return results with title, URL, and snippet
 • agent_fetch_url(url): Retrieve full HTML content from a specific URL  
 • agent_strip_html(html): Convert HTML to clean, readable text
+• research_and_save_url(url): Save the content of a URL to a file
+• research_search_results(query): Save the search results of a query to a file
 
 RESEARCH STRATEGY:
-You will receive a profile summary and a list of targeted search queries. Execute your research systematically:
+You will receive a profile summary and a list of targeted search queries. Execute your research systematically but efficiently:
 
 1. QUERY EXECUTION:
-   - Process each provided search query using agent_web_search(query, 3-5)
-   - For direct URLs (social profiles), use agent_fetch_url() with high priority
-   - If a query yields no relevant results, move to the next query
+   - For each search query, use research_search_results(query, max_urls=3) to search and save sources automatically
+   - For direct URLs (social profiles), use research_and_save_url(url, query_context="Direct profile") 
+   - These tools will automatically fetch content, process it, and save to Firestore
    - Continue until all queries are processed or sufficient data is gathered
 
-2. SOURCE EVALUATION:
-   - Assess each source for relevance to the target person
-   - Prioritize primary sources (person's own profiles, official company pages)
-   - Consider source credibility (LinkedIn, GitHub, company websites > forums, random blogs)
-   - Filter out false positives (people with same name but different context)
+2. TOOL USAGE:
+   - research_search_results(): Searches web and saves promising sources (max 3 per query)
+   - research_and_save_url(): Directly processes and saves a specific URL
+   - WebSearchTool(): Only use if you need to see search results before deciding which to process
+   - agent_fetch_url() + agent_strip_html(): Only use for manual content analysis
 
-3. CONTENT EXTRACTION:
-   - For each relevant source, extract key factual information
-   - Focus on: current role, achievements, projects, education, skills, recognitions
-   - Use search result snippets when sufficient, or fetch full content if needed
-   - Summarize content concisely while preserving important details
-
-4. SOURCE TYPE IDENTIFICATION:
-   Identify source types when possible:
-   - "linkedin" for LinkedIn profiles
-   - "github" for GitHub repositories/profiles  
-   - "company_website" for official company pages
-   - "news_article" for news coverage or interviews
-   - "blog_post" for personal or professional blogs
-   - "academic" for research papers or academic profiles
-   - "portfolio" for personal portfolio websites
+3. SOURCE EVALUATION:
+   - Prioritize: official profiles, LinkedIn, company pages, authoritative sources
+   - SKIP: generic search results, news mentions without detail, social media posts
+   - The incremental tools will automatically filter and save only valuable content
 
 CRITICAL REQUIREMENTS:
 • FACTUAL ACCURACY: Only include information explicitly stated in sources
 • NO FABRICATION: Do not invent, infer, or extrapolate beyond source content
 • COMPREHENSIVE COVERAGE: Process all provided queries unless they yield no results
-• STRUCTURED OUTPUT: Return a JSON list of ResearchDoc objects
+• STRUCTURED OUTPUT: Save data to files using research_and_save_url and research_search_results
 
 OUTPUT FORMAT:
-Your final response must be a valid JSON array containing ResearchDoc objects:
-[
-  {
-    "title": "Exact title from source",
-    "url": "Full URL of the source", 
-    "content": "Concise summary of relevant information found",
-    "source_type": "identified_type_or_null"
-  },
-  ...
-]
+Your final response should be a summary report of the research completed, including:
+- Number of search queries processed
+- Number of sources saved
+- Key types of information found
+- Any issues encountered
+
+Example: "Completed research for John Smith. Processed 3 search queries, saved 5 sources including LinkedIn profile and company bio. Found professional background in software engineering and recent project work."
 
 QUALITY STANDARDS:
-- Each ResearchDoc.content should be 50-300 characters summarizing key facts
+- Each file should contain relevant information about the person
 - Ensure URLs are accessible and relevant
 - If a source mentions the person but contains no useful professional information, exclude it
-- If ALL queries yield no relevant results, return an empty array: []
+- If ALL queries yield no relevant results, return an empty list: []
 
 ERROR HANDLING:
-- If agent_web_search fails for a query, log the issue and continue with remaining queries
+- If web_search fails for a query, log the issue and continue with remaining queries
 - If agent_fetch_url fails for a URL, try using the search snippet instead
 - Never let individual failures stop the entire research process
 
@@ -255,11 +244,13 @@ Remember: Your research provides the factual foundation for content generation. 
         model="gpt-4o-mini",
         instructions=researcher_instructions,
         tools=[
-            agent_web_search,
+            WebSearchTool(),
             agent_fetch_url, 
-            agent_strip_html
+            agent_strip_html,
+            research_and_save_url,
+            research_search_results
         ],
-        output_type=List[ResearchDoc],
+        output_type=str,
         model_settings=ModelSettings(
             temperature=0.3,  # Lower temperature for more consistent, factual output
             max_tokens=4000   # Allow for comprehensive research output
@@ -302,7 +293,7 @@ Return a valid UserProfileData JSON object with all available information proper
         name="ProfileSynthesisAgent",
         model="gpt-4o-mini", 
         instructions=synthesis_instructions,
-        output_type=UserProfileData,
+        output_type=AgentOutputSchema(UserProfileData, strict_json_schema=False),
         model_settings=ModelSettings(temperature=0.2)
     )
 
@@ -403,6 +394,81 @@ Your role is to ensure the entire process runs smoothly while maintaining the hi
     )
 
 # ---------------------------------------------------------------------
+# 7. NEW AGENTS ------------------------------------------------------
+
+def get_site_generator_agent() -> Agent:
+    """
+    Site generator agent for creating website structure and content.
+    """
+    return Agent(
+        name="SiteGeneratorAgent",
+        description="Generates comprehensive website structure and content based on user profile and research findings",
+        instructions="""You are a professional website generator that creates modern, engaging personal websites.
+        
+        Your task is to generate complete website content including:
+        - HTML structure with responsive design
+        - Professional styling
+        - Optimized content layout
+        - SEO-friendly elements
+        
+        Focus on creating clean, modern designs that effectively showcase the user's professional profile and achievements.""",
+        model=openai.OpenAI(),
+        model_config=ModelConfig(
+            model="gpt-4o-mini",
+            temperature=0.3,
+            max_tokens=4000
+        )
+    )
+
+def get_translator_agent() -> Agent:
+    """
+    Translation agent for localizing content to different languages.
+    """
+    return Agent(
+        name="TranslatorAgent", 
+        description="Translates content to specified target languages while maintaining context and tone",
+        instructions="""You are a professional translator specializing in website content localization.
+        
+        Your responsibilities:
+        - Translate content accurately while preserving meaning and tone
+        - Adapt content for cultural nuances when appropriate
+        - Maintain professional terminology consistency
+        - Ensure translations flow naturally in the target language
+        
+        Always provide high-quality translations that read naturally to native speakers.""",
+        model=openai.OpenAI(),
+        model_config=ModelConfig(
+            model="gpt-4o-mini", 
+            temperature=0.2,
+            max_tokens=3000
+        )
+    )
+
+def translate_text(text: str, target_language: str) -> str:
+    """
+    Translate text to the specified target language using the translator agent.
+    
+    Args:
+        text: Text to translate
+        target_language: Target language (e.g., 'Spanish', 'French', 'German')
+        
+    Returns:
+        Translated text
+    """
+    try:
+        translator = get_translator_agent()
+        prompt = f"Translate the following text to {target_language}:\n\n{text}"
+        
+        result = translator.run(prompt, max_turns=1)
+        if hasattr(result, 'messages') and result.messages:
+            return result.messages[-1].content
+        return text  # Return original if translation fails
+        
+    except Exception as e:
+        logger.error(f"Translation failed: {e}")
+        return text  # Return original text if translation fails
+
+# ---------------------------------------------------------------------
 # 7. EXPORTS ---------------------------------------------------------
 __all__ = [
     "get_hero_agent",
@@ -413,6 +479,8 @@ __all__ = [
     "get_profile_synthesis_agent",
     "get_content_validator_agent",
     "get_orchestrator_agent",
+    "get_site_generator_agent",
+    "get_translator_agent",
     "ResearchDoc",
     "EnhancedResearchDoc",
     "UserProfileData"

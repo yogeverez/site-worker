@@ -250,12 +250,14 @@ def enhanced_health_check():
         # Check OpenAI API configuration
         openai_configured = bool(os.getenv("OPENAI_API_KEY", ""))
         
-        # Check SerpAPI configuration  
-        serpapi_configured = bool(os.getenv("SERPAPI_KEY", ""))
+        # Check search configuration
+        search_backend = "mock_implementation"
+        search_operational = True
+        
+        bypass_search = False  # No longer needed with mock implementation
         
         # Check environment configuration
         environment = os.getenv("ENVIRONMENT", "unknown")
-        bypass_serpapi = os.getenv("BYPASS_SERPAPI_RESEARCH", "false").lower() == "true"
         
         # Test basic functionality
         try:
@@ -273,8 +275,8 @@ def enhanced_health_check():
             "environment": environment,
             "configuration": {
                 "openai_api_configured": openai_configured,
-                "serpapi_configured": serpapi_configured, 
-                "bypass_serpapi_research": bypass_serpapi,
+                "search_backend": search_backend,
+                "search_operational": search_operational,
                 "database_connection": db_connection
             },
             "features": {

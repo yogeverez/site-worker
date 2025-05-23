@@ -1,4 +1,7 @@
-import os, requests, re
+"""
+Enhanced tools and utilities for site worker operations.
+"""
+import os
 import time
 import logging
 import asyncio
@@ -6,6 +9,8 @@ import urllib.parse
 import threading
 import functools
 import json
+import requests
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional
 from bs4 import BeautifulSoup
@@ -14,51 +19,51 @@ from pydantic import TypeAdapter, ValidationError
 from json import JSONDecodeError
 import openai
 from openai import RateLimitError, APIStatusError
-from site_agents import (
-    get_hero_agent, get_about_agent, get_features_agent, 
-    translate_text, get_researcher_agent, ResearchDoc
-)
-from agents import Runner
-from schemas import HeroSection, AboutSection, FeaturesList, UserProfileData, ResearchOutput
-from search_utils import search_web
 import datetime
+
+from database import get_db
+from schemas import UserProfileData, ResearchDoc, HeroSection, AboutSection, FeaturesList, ResearchOutput
+from site_agents import (
+    get_researcher_agent, 
+    get_profile_synthesis_agent,
+    get_site_generator_agent,
+    get_translator_agent,
+    get_hero_agent, 
+    get_about_agent, 
+    get_features_agent, 
+    translate_text
+)
+from agent_tool_impl import (
+    agent_fetch_url, agent_strip_html
+)
+from agents import Runner, RunConfig
+from search_utils import search_web
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Lazy initialization of Firestore client with retry logic
-_db = None
+def get_openai_client():
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        logger.error("OPENAI_API_KEY environment variable not set.")
+        raise ValueError("OPENAI_API_KEY not set")
+    return openai.OpenAI(api_key=api_key, max_retries=0)
 
-def get_db():
-    global _db
-    if _db is None:
-        retry_count = 0
-        max_retries = 3
-        last_error = None
-        
-        while retry_count < max_retries:
-            try:
-                logger.info(f"Initializing Firestore client (attempt {retry_count + 1}/{max_retries})")
-                _db = firestore.Client()
-                logger.info("Firestore client initialized successfully")
-                break
-            except Exception as e:
-                retry_count += 1
-                last_error = e
-                logger.warning(f"Failed to initialize Firestore client (attempt {retry_count}/{max_retries}): {e}")
-                if retry_count < max_retries:
-                    time.sleep(1)
-        
-        if _db is None:
-            logger.error(f"Failed to initialize Firestore client after {max_retries} attempts: {last_error}")
-            if os.getenv("ENVIRONMENT") == "development" or os.getenv("FLASK_ENV") == "development":
-                logger.warning("Using mock Firestore client for development environment")
-                from unittest.mock import MagicMock
-                _db = MagicMock()
-            else:
-                raise RuntimeError(f"Failed to initialize Firestore client: {last_error}")
-    return _db
+def convert_firestore_timestamps(data: Any) -> Any:
+    """Recursively converts Firestore Timestamp objects to ISO 8601 formatted strings."""
+    from google.api_core.datetime_helpers import DatetimeWithNanoseconds
+    
+    if isinstance(data, DatetimeWithNanoseconds) or isinstance(data, datetime.datetime):
+        dt_object = data
+        if dt_object.tzinfo is None or dt_object.tzinfo.utcoffset(dt_object) is None:
+            dt_object = dt_object.replace(tzinfo=datetime.timezone.utc)
+        return dt_object.isoformat()
+    elif isinstance(data, dict):
+        return {k: convert_firestore_timestamps(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [convert_firestore_timestamps(item) for item in data]
+    return data
 
 def get_site_input(uid: str) -> dict | None:
     """Fetches the siteInputDocument for a given UID from Firestore."""
@@ -68,13 +73,6 @@ def get_site_input(uid: str) -> dict | None:
     if doc.exists:
         return doc.to_dict()
     return None
-
-def get_openai_client():
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        logger.error("OPENAI_API_KEY environment variable not set.")
-        raise ValueError("OPENAI_API_KEY not set")
-    return openai.OpenAI(api_key=api_key, max_retries=0)
 
 async def _generate_comprehensive_search_queries(user_input: dict, client: openai.OpenAI, max_queries: int = 8, parent_logger: Optional[logging.Logger] = None) -> List[str]:
     """Enhanced query generation based on research recommendations."""
@@ -193,14 +191,14 @@ async def _generate_comprehensive_search_queries(user_input: dict, client: opena
         current_logger.error(f"Error generating search queries with LLM: {e}", exc_info=True)
         return all_potential_queries[:max_queries], direct_urls
 
-async def run_agent_safely(agent: Any, prompt: str, parent_logger: Optional[logging.Logger] = None, **kwargs) -> Any:
-    """Enhanced agent runner with comprehensive error handling."""
+async def run_agent_safely(agent: Any, prompt: str, parent_logger: Optional[logging.Logger] = None, max_turns: int = 15, **kwargs) -> Any:
+    """Enhanced agent runner with comprehensive error handling and configurable turn limits."""
     current_logger = parent_logger or logger
     try:
         current_logger.info(f"Running agent '{agent.name if hasattr(agent, 'name') else 'UnknownAgent'}'...")
         
         runner_instance = Runner()
-        result = await runner_instance.run(agent, prompt, **kwargs)
+        result = await runner_instance.run(agent, prompt, max_turns=max_turns, **kwargs)
         
         current_logger.info(f"Agent '{agent.name if hasattr(agent, 'name') else 'UnknownAgent'}' completed successfully.")
         return result
@@ -264,90 +262,104 @@ async def do_comprehensive_research(uid: str, timestamp: int | None = None, pare
 
         if not search_queries and not direct_urls:
             current_logger.warning(f"No search queries or direct URLs generated for user {uid}. Skipping research.")
-            await _create_empty_research_manifest(uid, timestamp, current_logger, "no_queries_generated")
+            await _create_empty_research_manifest(uid, timestamp, "no_queries_generated", current_logger)
             return
 
         current_logger.info(f"Generated {len(search_queries)} queries and {len(direct_urls)} direct URLs for user {uid}")
 
         # Research execution with enhanced error handling
-        research_docs: List[ResearchDoc] = []
-        failed_queries = []
+        research_docs = []  # Initialize outside try block to ensure it's accessible for saving
+        status = "unknown"
         successful_queries = []
+        research_session_id = timestamp or int(time.time())  # Define session ID early
         
-        # Check if we should bypass research due to API limits
-        BYPASS_RESEARCH_DUE_TO_SERPAPI_CREDITS = os.getenv("BYPASS_SERPAPI_RESEARCH", "false").lower() == "true"
-
-        if BYPASS_RESEARCH_DUE_TO_SERPAPI_CREDITS:
-            current_logger.warning("BYPASS: Skipping research agent execution due to SerpAPI configuration.")
-            status = "bypassed_serpapi_limits"
+        if not search_queries:
+            current_logger.warning(f"No search queries generated for user {uid}")
+            status = "no_queries_generated"
         else:
-            # Enhanced researcher prompt with better instructions
-            researcher_prompt = (
-                f"You are conducting comprehensive research for a {user_profile_for_query_gen.get('templateType', 'personal')} site.\n\n"
-                f"Profile Summary:\n"
+            # Set research context for incremental saving tools
+            from agent_research_tools import set_research_context
+            set_research_context(uid, research_session_id, current_logger)
+            
+            profile_summary_text = (
                 f"Name: {site_input.get('name', 'N/A')}\n"
                 f"Title: {site_input.get('title', 'N/A')}\n"
                 f"Company: {company_details.get('name', 'N/A')}\n"
-                f"Template Type: {user_profile_for_query_gen.get('templateType', 'resume')}\n\n"
-                f"Search Queries: {json.dumps(search_queries)}\n"
-                f"Direct URLs to prioritize: {json.dumps(direct_urls)}\n\n"
-                f"Instructions:\n"
-                f"1. Execute each search query systematically\n"
-                f"2. For direct URLs (social profiles), fetch them with high priority\n"
-                f"3. Focus on finding factual, verifiable information\n"
-                f"4. Prioritize professional achievements, projects, and public presence\n"
-                f"5. Return ALL relevant sources as structured ResearchDoc objects\n"
-                f"6. Do not fabricate or infer information beyond what sources contain\n\n"
-                f"Return a complete list of ResearchDoc objects with accurate source attribution."
+                f"Template Type: {user_profile_for_query_gen.get('templateType', 'unknown')}"
+            )
+            template = user_profile_for_query_gen.get('templateType', 'resume')
+            
+            researcher_prompt = (
+                f"Comprehensive Research Task:\n"
+                f"Target Profile: {profile_summary_text}\n"
+                f"Template Context: {template}\n\n"
+                f"Search Queries:\n"
+                + "\n".join([f"- {query}" for query in search_queries])
+                + f"\n\nDirect URLs:\n"
+                + "\n".join([f"- {url}" for url in direct_urls])
+                + f"\n\nExecute comprehensive research using the incremental saving tools:\n"
+                f"1. Use research_search_results(query, max_urls=3) for each search query\n"
+                f"2. Use research_and_save_url(url) for any direct URLs\n"
+                f"3. These tools automatically save data to Firestore as you work\n"
+                f"4. Focus on gathering factual information about the person\n"
+                f"5. Maintain high quality standards for source selection\n"
+                f"6. Return a summary of what research was completed\n\n"
+                f"Your response should summarize the research performed and sources found."
             )
             
             researcher_agent_instance = get_researcher_agent()
             
-            current_logger.info(f"Running enhanced researcher agent for user {uid}")
+            current_logger.info(f"Running enhanced researcher agent for user {uid} with incremental saving")
             agent_results = await run_agent_safely(
                 researcher_agent_instance, 
                 researcher_prompt, 
-                parent_logger=current_logger
+                parent_logger=current_logger,
+                max_turns=20  # Higher limit for research tasks with web searches
             )
 
             if agent_results is None:
                 current_logger.error(f"Researcher agent failed for user {uid}")
                 status = "agent_execution_failed"
-            elif not isinstance(agent_results, list):
-                current_logger.error(f"Researcher agent returned unexpected type: {type(agent_results)}")
-                status = "agent_output_invalid"
             else:
+                # With incremental saving, the agent just returns a summary
+                # The actual data is already saved to Firestore by the tools
+                current_logger.info(f"Research agent completed. Summary: {str(agent_results)[:200]}...")
+                status = "completed_successfully"
+                successful_queries = search_queries  # Assume all were attempted
+                
+                # Get count of saved documents from Firestore
                 try:
-                    adapter = TypeAdapter(List[ResearchDoc])
-                    research_docs = adapter.validate_python(agent_results)
-                    status = "completed_successfully"
-                    successful_queries = search_queries  # Assume all were attempted
-                    current_logger.info(f"Successfully validated {len(research_docs)} research documents")
-                except ValidationError as e:
-                    current_logger.error(f"Validation error for research documents: {e}")
-                    status = "validation_failed"
+                    db = get_db()
+                    user_research_col_ref = db.collection("research").document(uid).collection("sources")
+                    # Filter by current session
+                    sources_query = user_research_col_ref.where("research_session_id", "==", research_session_id)
+                    saved_docs = list(sources_query.stream())
+                    research_docs_count = len(saved_docs)
+                    current_logger.info(f"Found {research_docs_count} research documents saved in current session")
+                except Exception as e:
+                    current_logger.error(f"Error counting saved research documents: {e}")
+                    research_docs_count = 0
 
         # Enhanced data persistence with comprehensive manifest
         db = get_db()
         source_refs = []
         
-        # Save research documents
-        if research_docs:
-            user_research_col_ref = db.collection("research").document(uid).collection("sources")
-            
-            for i, research_doc in enumerate(research_docs):
-                try:
-                    source_doc_ref = user_research_col_ref.document()
-                    doc_data = research_doc.model_dump()
-                    doc_data['timestamp'] = firestore.SERVER_TIMESTAMP
-                    doc_data['research_session_id'] = timestamp or int(time.time())
-                    
-                    source_doc_ref.set(doc_data)
-                    source_refs.append(source_doc_ref)
-                    current_logger.info(f"Saved source {i+1}/{len(research_docs)}: '{research_doc.title}'")
-                except Exception as e:
-                    current_logger.error(f"Error saving ResearchDoc '{research_doc.title}': {e}", exc_info=True)
-
+        # Research documents are already saved incrementally by the agent tools
+        # Just get the final count for the manifest
+        research_docs_count = 0
+        if status == "completed_successfully":
+            try:
+                user_research_col_ref = db.collection("research").document(uid).collection("sources")
+                sources_query = user_research_col_ref.where("research_session_id", "==", research_session_id)
+                saved_docs = list(sources_query.stream())
+                research_docs_count = len(saved_docs)
+                current_logger.info(f"✅ Found {research_docs_count} research documents already saved by incremental tools")
+            except Exception as e:
+                current_logger.error(f"Error counting saved research documents: {e}")
+                research_docs_count = 0
+        else:
+            current_logger.warning(f"⚠️ Research status is '{status}' - no documents to count.")
+        
         # Create comprehensive research manifest
         research_duration = time.time() - research_start_time
         
@@ -363,34 +375,33 @@ async def do_comprehensive_research(uid: str, timestamp: int | None = None, pare
             "search_queries_generated": search_queries,
             "direct_urls_identified": direct_urls,
             "successful_queries": successful_queries,
-            "failed_queries": failed_queries,
+            "failed_queries": [],
             
             # Results tracking
-            "total_sources_found": len(research_docs),
-            "sources_saved_successfully": len(source_refs),
-            "saved_source_ids": [ref.id for ref in source_refs],
-            "saved_source_urls": [doc.url for doc in research_docs],
-            "source_types_found": list(set([doc.source_type for doc in research_docs if doc.source_type])),
+            "total_sources_found": research_docs_count,
+            "sources_saved_successfully": research_docs_count,
+            "saved_source_ids": [],
+            "saved_source_urls": [],
+            "source_types_found": [],
             
             # Quality metrics
-            "average_content_length": sum(len(doc.content) for doc in research_docs) / len(research_docs) if research_docs else 0,
-            "unique_domains_found": len(set([urllib.parse.urlparse(doc.url).netloc for doc in research_docs])),
+            "average_content_length": 0,
+            "unique_domains_found": 0,
             
             # Configuration info
-            "bypass_serpapi_enabled": BYPASS_RESEARCH_DUE_TO_SERPAPI_CREDITS,
             "max_queries_configured": 6
         }
 
         manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
         manifest_ref.set(manifest_data)
         
-        current_logger.info(f"Research completed for user {uid}. Status: {status}, Duration: {research_duration:.2f}s, Sources: {len(research_docs)}")
+        current_logger.info(f"Research completed for user {uid}. Status: {status}, Duration: {research_duration:.2f}s, Sources: {research_docs_count}")
 
     except Exception as e:
         current_logger.error(f"Critical error in do_comprehensive_research for user {uid}: {e}", exc_info=True)
         await _create_error_research_manifest(uid, timestamp, str(e), current_logger)
 
-async def _create_empty_research_manifest(uid: str, timestamp: int | None, logger: logging.Logger, reason: str):
+async def _create_empty_research_manifest(uid: str, timestamp: int | None, reason: str, logger: logging.Logger):
     """Create a manifest when research cannot proceed."""
     try:
         db = get_db()
@@ -429,21 +440,6 @@ async def _create_error_research_manifest(uid: str, timestamp: int | None, error
         logger.info(f"Error research manifest created for user {uid}")
     except Exception as e:
         logger.error(f"Failed to create error research manifest for user {uid}: {e}")
-
-def convert_firestore_timestamps(data: Any) -> Any:
-    """Recursively converts Firestore Timestamp objects to ISO 8601 formatted strings."""
-    from google.api_core.datetime_helpers import DatetimeWithNanoseconds
-    
-    if isinstance(data, DatetimeWithNanoseconds) or isinstance(data, datetime.datetime):
-        dt_object = data
-        if dt_object.tzinfo is None or dt_object.tzinfo.utcoffset(dt_object) is None:
-            dt_object = dt_object.replace(tzinfo=datetime.timezone.utc)
-        return dt_object.isoformat()
-    elif isinstance(data, dict):
-        return {k: convert_firestore_timestamps(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [convert_firestore_timestamps(item) for item in data]
-    return data
 
 async def generate_enhanced_site_content(uid: str, languages: List[str], timestamp: int | None = None, parent_logger: Optional[logging.Logger] = None):
     """

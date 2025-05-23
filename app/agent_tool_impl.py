@@ -7,22 +7,21 @@ import time
 import urllib.parse
 from bs4 import BeautifulSoup
 from typing import List, Dict, Any, Optional
-from agents import function_tool
-import json
-
-# Import enhanced search_web from search_utils.py
-from search_utils import search_web as generic_search_web
+from agents import function_tool, WebSearchTool
 
 logger = logging.getLogger(__name__)
+
+# Initialize the WebSearchTool from agents library
+web_search_tool = WebSearchTool()
 
 @function_tool
 def agent_web_search(query: str, num_results: int = 5) -> List[Dict[str, str]]:
     """
-    Enhanced web search tool with better error handling and result validation.
+    Enhanced web search tool using agents library's built-in search functionality.
     Implements research recommendations for comprehensive source discovery.
     """
     try:
-        logger.info(f"🔍 Executing web search for: '{query}' (requesting {num_results} results)")
+        logger.info(f" Executing real web search for: '{query}' (requesting {num_results} results)")
         
         # Input validation
         if not query or not query.strip():
@@ -35,8 +34,18 @@ def agent_web_search(query: str, num_results: int = 5) -> List[Dict[str, str]]:
             cleaned_query = cleaned_query[:200]
             logger.warning(f"Query truncated to 200 characters: '{cleaned_query}'")
         
-        # Execute search with retry logic built into generic_search_web
-        results = generic_search_web(cleaned_query, num_results)
+        # Execute search using agents library's WebSearchTool
+        search_results = web_search_tool.search(cleaned_query, num_results=num_results)
+        
+        # Convert to expected format and enhance results
+        results = []
+        if hasattr(search_results, 'results'):
+            results = search_results.results
+        elif isinstance(search_results, list):
+            results = search_results
+        else:
+            logger.warning(f"Unexpected search result format: {type(search_results)}")
+            return []
         
         # Enhanced result validation and enrichment
         validated_results = []
@@ -49,53 +58,69 @@ def agent_web_search(query: str, num_results: int = 5) -> List[Dict[str, str]]:
                 
                 # Clean and validate URL
                 url = result['url'].strip()
+                title = result['title'].strip()
+                snippet = result.get('snippet', '').strip()
+                
+                # Basic URL validation
                 if not url.startswith(('http://', 'https://')):
-                    logger.warning(f"Skipping result {i}: invalid URL format: {url}")
+                    logger.warning(f"Skipping result {i}: invalid URL format")
                     continue
                 
-                # Enhance result with additional metadata
-                enhanced_result = {
-                    'title': result['title'].strip(),
+                # Create validated result
+                validated_result = {
                     'url': url,
-                    'snippet': result.get('snippet', '').strip(),
-                    'domain': urllib.parse.urlparse(url).netloc,
-                    'search_query': cleaned_query,
-                    'result_position': i + 1
+                    'title': title,
+                    'snippet': snippet,
+                    'position': result.get('position', i + 1)
                 }
                 
-                # Add source type hints based on domain
-                domain = enhanced_result['domain'].lower()
-                if 'linkedin.com' in domain:
-                    enhanced_result['suggested_source_type'] = 'linkedin'
-                elif 'github.com' in domain:
-                    enhanced_result['suggested_source_type'] = 'github'
-                elif 'twitter.com' in domain or 'x.com' in domain:
-                    enhanced_result['suggested_source_type'] = 'twitter'
-                elif any(news_domain in domain for news_domain in ['techcrunch.com', 'wired.com', 'reuters.com', 'bbc.com']):
-                    enhanced_result['suggested_source_type'] = 'news_article'
-                elif 'medium.com' in domain or 'blog' in domain:
-                    enhanced_result['suggested_source_type'] = 'blog_post'
-                else:
-                    enhanced_result['suggested_source_type'] = 'general'
+                # Add domain-based source type categorization
+                try:
+                    parsed_url = urllib.parse.urlparse(url)
+                    domain = parsed_url.netloc.lower()
+                    
+                    if 'linkedin.com' in domain:
+                        validated_result['suggested_source_type'] = 'linkedin'
+                    elif 'github.com' in domain:
+                        validated_result['suggested_source_type'] = 'github'
+                    elif 'twitter.com' in domain or 'x.com' in domain:
+                        validated_result['suggested_source_type'] = 'twitter'
+                    elif any(news_domain in domain for news_domain in ['techcrunch.com', 'wired.com', 'reuters.com', 'bbc.com']):
+                        validated_result['suggested_source_type'] = 'news_article'
+                    elif 'medium.com' in domain or 'blog' in domain:
+                        validated_result['suggested_source_type'] = 'blog_post'
+                    else:
+                        validated_result['suggested_source_type'] = 'general'
+                        
+                    validated_result['domain'] = domain
+                    
+                except Exception as domain_error:
+                    logger.warning(f"Error parsing domain for {url}: {domain_error}")
+                    validated_result['suggested_source_type'] = 'general'
+                    validated_result['domain'] = 'unknown'
                 
-                validated_results.append(enhanced_result)
+                validated_results.append(validated_result)
                 
             except Exception as e:
-                logger.warning(f"Error processing search result {i}: {e}")
+                logger.warning(f"Error processing result {i}: {e}")
                 continue
         
-        logger.info(f"✅ Web search completed: {len(validated_results)}/{len(results)} results validated for '{query}'")
+        logger.info(f" Web search completed: {len(validated_results)} validated results")
         return validated_results
         
     except Exception as e:
-        logger.error(f"❌ Web search failed for query '{query}': {e}", exc_info=True)
+        logger.error(f" Error in agent_web_search: {e}", exc_info=True)
         return []
 
 @function_tool
-def agent_fetch_url(url: str) -> str:
+def agent_fetch_url(url: str, max_content_size: int = 8000) -> str:
     """
-    Enhanced URL fetching tool with better error handling, content validation, and smart extraction.
-    Implements research recommendations for reliable content retrieval.
+    Enhanced URL fetching tool with content size limiting to prevent context window overflow.
+    Implements research recommendations for reliable content retrieval with smart truncation.
+    
+    Args:
+        url: The URL to fetch
+        max_content_size: Maximum content size in characters (default 8000)
     """
     if not url or not url.strip():
         logger.warning("Empty URL provided to agent_fetch_url")
@@ -124,12 +149,12 @@ def agent_fetch_url(url: str) -> str:
     
     while retry_count < max_retries:
         try:
-            logger.info(f"🌐 Fetching URL: {url} (attempt {retry_count + 1}/{max_retries})")
+            logger.info(f" Fetching URL: {url} (attempt {retry_count + 1}/{max_retries})")
             
             # Add progressive delays between retries
             if retry_count > 0:
                 delay = min(2 ** retry_count, 10)  # Exponential backoff capped at 10 seconds
-                logger.info(f"⏳ Waiting {delay}s before retry...")
+                logger.info(f" Waiting {delay}s before retry...")
                 time.sleep(delay)
             
             resp = requests.get(
@@ -156,67 +181,76 @@ def agent_fetch_url(url: str) -> str:
                     logger.warning(f"Non-HTML content type '{content_type}' from {url}")
                     # Still try to process it as some sites have incorrect content-type headers
                 
+                # Truncate content to prevent context window overflow
+                if len(content) > max_content_size:
+                    logger.warning(f"Truncating content from {url} to {max_content_size} characters")
+                    content = content[:max_content_size]
+                
                 # Success - log and return
                 content_size = len(content)
-                logger.info(f"✅ Successfully fetched {content_size} characters from {url}")
+                logger.info(f" Successfully fetched {content_size} characters from {url}")
                 return content
                 
             elif resp.status_code in [301, 302, 303, 307, 308]:
                 # Handle redirects that weren't followed
                 redirect_url = resp.headers.get('location', '')
-                logger.info(f"🔄 Redirect detected from {url} to {redirect_url}")
+                logger.info(f" Redirect detected from {url} to {redirect_url}")
                 # requests should handle this automatically, but log for debugging
                 
             elif resp.status_code == 403:
-                logger.warning(f"🚫 Access forbidden (403) for {url}")
+                logger.warning(f" Access forbidden (403) for {url}")
                 break  # Don't retry on permission errors
                 
             elif resp.status_code == 404:
-                logger.warning(f"🔍 URL not found (404): {url}")
+                logger.warning(f" URL not found (404): {url}")
                 break  # Don't retry on not found
                 
             elif resp.status_code == 429:
-                logger.warning(f"⏳ Rate limited (429) for {url}")
+                logger.warning(f" Rate limited (429) for {url}")
                 # Implement longer delay for rate limiting
                 if retry_count < max_retries - 1:
                     time.sleep(30)  # Wait 30 seconds for rate limit
                     
             else:
-                logger.warning(f"⚠️ HTTP {resp.status_code} received from {url}")
+                logger.warning(f" HTTP {resp.status_code} received from {url}")
             
             retry_count += 1
             
         except requests.exceptions.Timeout:
-            logger.warning(f"⏰ Timeout occurred fetching {url} (attempt {retry_count + 1})")
+            logger.warning(f" Timeout occurred fetching {url} (attempt {retry_count + 1})")
             retry_count += 1
             
         except requests.exceptions.ConnectionError as e:
-            logger.warning(f"🔌 Connection error fetching {url}: {e}")
+            logger.warning(f" Connection error fetching {url}: {e}")
             retry_count += 1
             
         except requests.exceptions.RequestException as e:
-            logger.warning(f"📡 Request error fetching {url}: {e}")
+            logger.warning(f" Request error fetching {url}: {e}")
             retry_count += 1
             
         except Exception as e:
-            logger.error(f"💥 Unexpected error fetching {url}: {e}", exc_info=True)
+            logger.error(f" Unexpected error fetching {url}: {e}", exc_info=True)
             retry_count += 1
     
-    logger.error(f"❌ Failed to fetch content from {url} after {max_retries} attempts")
+    logger.error(f" Failed to fetch content from {url} after {max_retries} attempts")
     return ""
 
 @function_tool  
-def agent_strip_html(html: str) -> str:
+def agent_strip_html(html: str, max_output_size: int = 5000) -> str:
     """
-    Enhanced HTML stripping tool with smart content extraction and better text cleaning.
-    Implements research recommendations for extracting meaningful content.
+    Enhanced HTML stripping tool with smart content extraction, aggressive cleaning, and size limiting.
+    Implements research recommendations for extracting meaningful content while preventing context overflow.
+    
+    Args:
+        html: The HTML content to strip
+        max_output_size: Maximum output size in characters (default 5000)
     """
     if not html or not html.strip():
         logger.warning("Empty HTML content provided to agent_strip_html")
         return ""
     
     try:
-        logger.debug(f"🧹 Processing HTML content ({len(html)} characters)")
+        logger.debug(f" Processing HTML content ({len(html)} characters)")
         
         # Parse HTML with BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
@@ -302,14 +336,19 @@ def agent_strip_html(html: str) -> str:
             if len(text) < 20:
                 logger.warning("Extracted text is very short, may not be meaningful content")
             
-            logger.debug(f"✅ Successfully extracted {len(text)} characters of clean text")
+            # Truncate text to prevent context overflow
+            if len(text) > max_output_size:
+                logger.warning(f"Truncating text to {max_output_size} characters")
+                text = text[:max_output_size]
+            
+            logger.debug(f" Successfully extracted {len(text)} characters of clean text")
             return text
         else:
             logger.warning("No text content extracted from HTML")
             return ""
             
     except Exception as e:
-        logger.error(f"❌ Error stripping HTML: {e}", exc_info=True)
+        logger.error(f" Error stripping HTML: {e}", exc_info=True)
         # Fallback to simple text extraction
         try:
             soup = BeautifulSoup(html, "html.parser")
@@ -317,7 +356,6 @@ def agent_strip_html(html: str) -> str:
         except:
             return ""
 
-@function_tool
 def agent_analyze_source_relevance(content: str, person_name: str, context_keywords: List[str] = None) -> Dict[str, Any]:
     """
     Enhanced tool to analyze whether source content is relevant to the target person.
@@ -327,7 +365,7 @@ def agent_analyze_source_relevance(content: str, person_name: str, context_keywo
         return {"relevant": False, "confidence": 0.0, "reason": "Missing content or person name"}
     
     try:
-        logger.debug(f"🎯 Analyzing source relevance for '{person_name}'")
+        logger.debug(f" Analyzing source relevance for '{person_name}'")
         
         content_lower = content.lower()
         name_lower = person_name.lower()
@@ -394,11 +432,11 @@ def agent_analyze_source_relevance(content: str, person_name: str, context_keywo
             "reason": _generate_relevance_reason(relevance_indicators, is_relevant)
         }
         
-        logger.debug(f"📊 Relevance analysis result: {result}")
+        logger.debug(f" Relevance analysis result: {result}")
         return result
         
     except Exception as e:
-        logger.error(f"❌ Error analyzing source relevance: {e}", exc_info=True)
+        logger.error(f" Error analyzing source relevance: {e}", exc_info=True)
         return {"relevant": False, "confidence": 0.0, "reason": f"Analysis error: {str(e)}"}
 
 def _generate_relevance_reason(indicators: Dict[str, int], is_relevant: bool) -> str:
@@ -435,7 +473,7 @@ def agent_extract_structured_data(html: str, url: str) -> Dict[str, Any]:
         return {}
     
     try:
-        logger.debug(f"📋 Extracting structured data from {url}")
+        logger.debug(f" Extracting structured data from {url}")
         
         soup = BeautifulSoup(html, "html.parser")
         structured_data = {}
@@ -499,9 +537,9 @@ def agent_extract_structured_data(html: str, url: str) -> Dict[str, Any]:
         if metadata:
             structured_data['basic_metadata'] = metadata
         
-        logger.debug(f"✅ Extracted structured data: {list(structured_data.keys())}")
+        logger.debug(f" Extracted structured data: {list(structured_data.keys())}")
         return structured_data
         
     except Exception as e:
-        logger.error(f"❌ Error extracting structured data: {e}", exc_info=True)
+        logger.error(f" Error extracting structured data: {e}", exc_info=True)
         return {}

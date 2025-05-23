@@ -82,7 +82,8 @@ class ResearchManifest(BaseModel):
     # Configuration and context
     template_type: Optional[str] = Field(None, description="Template type that influenced research strategy")
     max_queries_configured: int = Field(5, description="Maximum number of queries configured for this research")
-    bypass_serpapi_enabled: bool = Field(False, description="Whether SerpAPI was bypassed due to limits")
+    search_backend: str = Field("mock_implementation", description="Search backend used for research")
+    search_operational: bool = Field(True, description="Whether search functionality is operational")
     
     # Error tracking
     error_message: Optional[str] = Field(None, description="Error message if research failed")
