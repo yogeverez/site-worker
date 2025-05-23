@@ -5,6 +5,7 @@ import os
 import time
 import logging
 import asyncio
+import agent_research_tools
 import urllib.parse
 import threading
 import functools
@@ -389,13 +390,121 @@ async def do_comprehensive_research(uid: str, timestamp: int | None = None, pare
             "unique_domains_found": 0,
             
             # Configuration info
-            "max_queries_configured": 6
+            "max_queries_configured": 6,
+            
+            # Add accumulated raw data summary
+            "content_summary": agent_research_tools.generate_content_summary(uid, research_session_id),
+            
+            # Add comprehensive user data summary
+            "user_data_summary": {
+                "session_id": research_session_id,
+                "timestamp": firestore.SERVER_TIMESTAMP,
+                "research_duration": research_duration,
+                "sources_count": research_docs_count,
+                "search_queries": search_queries,
+                "successful_queries": successful_queries
+            },
+            
+            # Add comprehensive user data summary
+            "user_data_summary": {
+                "session_id": research_session_id,
+                "timestamp": firestore.SERVER_TIMESTAMP,
+                "research_duration": research_duration,
+                "sources_count": research_docs_count,
+                "search_queries": search_queries,
+                "successful_queries": successful_queries
+            }
         }
+
+        # Create a separate comprehensive summary document
+        summary_doc_ref = db.collection("research").document(uid).collection("summary").document("comprehensive_summary")
+        
+        # Get all sources for this research session to create a comprehensive summary
+        sources_ref = db.collection("research").document(uid).collection("sources")
+        query = sources_ref.where("research_session_id", "==", research_session_id)
+        sources = query.get()
+        
+        # Extract key information from all sources
+        source_summaries = []
+        all_snippets = []
+        all_urls = []
+        for source in sources:
+            data = source.to_dict()
+            source_summaries.append({
+                "title": data.get("title", ""),
+                "url": data.get("url", ""),
+                "snippet": data.get("snippet", ""),
+                "confidence_score": data.get("metadata", {}).get("confidence_score", 0)
+            })
+            all_snippets.append(data.get("snippet", ""))
+            all_urls.append(data.get("url", ""))
+        
+        # Create comprehensive summary document
+        summary_doc_ref.set({
+            "uid": uid,
+            "session_id": research_session_id,
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "sources_count": len(source_summaries),
+            "source_summaries": source_summaries,
+            "all_urls": all_urls,
+            "combined_snippets": "\n\n".join(all_snippets),
+            "research_duration": research_duration
+        }, merge=True)
+        
+        current_logger.info(f"Created comprehensive research summary for user {uid}")
+        
+
+        # Create a separate comprehensive summary document
+        summary_doc_ref = db.collection("research").document(uid).collection("summary").document("comprehensive_summary")
+        
+        # Get all sources for this research session to create a comprehensive summary
+        sources_ref = db.collection("research").document(uid).collection("sources")
+        query = sources_ref.where("research_session_id", "==", research_session_id)
+        sources = query.get()
+        
+        # Extract key information from all sources
+        source_summaries = []
+        all_snippets = []
+        all_urls = []
+        for source in sources:
+            data = source.to_dict()
+            source_summaries.append({
+                "title": data.get("title", ""),
+                "url": data.get("url", ""),
+                "snippet": data.get("snippet", ""),
+                "confidence_score": data.get("metadata", {}).get("confidence_score", 0)
+            })
+            all_snippets.append(data.get("snippet", ""))
+            all_urls.append(data.get("url", ""))
+        
+        # Create comprehensive summary document
+        summary_doc_ref.set({
+            "uid": uid,
+            "session_id": research_session_id,
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "sources_count": len(source_summaries),
+            "source_summaries": source_summaries,
+            "all_urls": all_urls,
+            "combined_snippets": "\n\n".join(all_snippets),
+            "research_duration": research_duration
+        }, merge=True)
+        
+        current_logger.info(f"Created comprehensive research summary for user {uid}")
 
         manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
         manifest_ref.set(manifest_data)
         
         current_logger.info(f"Research completed for user {uid}. Status: {status}, Duration: {research_duration:.2f}s, Sources: {research_docs_count}")
+        
+        # Always trigger site content generation after research
+        current_logger.info(f"Triggering site content generation for user {uid} after successful research")
+        # Use default language if not specified
+        languages = ["en"]
+        try:
+            # Run site generation asynchronously
+            asyncio.create_task(generate_enhanced_site_content(uid, languages, timestamp, current_logger))
+        except Exception as e:
+            current_logger.error(f"Failed to trigger site generation after research: {e}", exc_info=True)
 
     except Exception as e:
         current_logger.error(f"Critical error in do_comprehensive_research for user {uid}: {e}", exc_info=True)
@@ -563,7 +672,8 @@ async def generate_enhanced_site_content(uid: str, languages: List[str], timesta
         if timestamp:
             update_data["requestTimestamp"] = timestamp
 
-        site_doc_ref.set(update_data, merge=True)
+        # Always overwrite existing content with new content
+        site_doc_ref.set(update_data, merge=False)
         current_logger.info(f"Saved enhanced generated content for user {uid}")
 
         # Enhanced translation process

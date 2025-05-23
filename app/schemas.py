@@ -22,6 +22,8 @@ class ResearchDoc(BaseModel):
     title: str = Field(..., description="Title of the research document or webpage")
     url: str = Field(..., description="URL of the source")
     content: str = Field(..., description="Summarized content from the source")
+    snippet: Optional[str] = Field(None, description="Short snippet or preview of the content")
+    raw_content: Optional[str] = Field(None, description="Raw HTML content from the source")
     source_type: Optional[str] = Field(None, description="Type of source (e.g., 'linkedin', 'github', 'news_article', 'blog_post', 'company_website')")
     content_translations: Dict[str, str] = Field(default_factory=dict, description="Translations of content for different languages")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata about the source")

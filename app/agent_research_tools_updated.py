@@ -5,7 +5,7 @@ import logging
 import time
 import requests
 import re
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from bs4 import BeautifulSoup
 from google.cloud import firestore
 from agents import function_tool, Agent, WebSearchTool, Runner
@@ -126,12 +126,19 @@ def research_and_save_url(url: str, query_context: str = "") -> str:
         title = next((line.strip() for line in lines[:5] if len(line.strip()) > 10), url.split('/')[-1])
         title = title[:100]  # Limit title length
         
+        # Create snippet from first few lines of content
+        snippet = clean_content.strip()[:300] + "..." if len(clean_content.strip()) > 300 else clean_content.strip()
+        
+        # Limit raw content size to prevent Firestore document size limits (1MB)
+        max_raw_content_size = 500000  # ~500KB to stay well under the limit
+        limited_raw_content = raw_content[:max_raw_content_size] if len(raw_content) > max_raw_content_size else raw_content
+        
         research_doc = ResearchDoc(
             title=title,
             url=url,
             content=clean_content,
-            snippet=clean_content.strip()[:300] + "..." if len(clean_content.strip()) > 300 else clean_content.strip(),
-            raw_content=raw_content[:500000] if len(raw_content) > 500000 else raw_content,
+            snippet=snippet,
+            raw_content=limited_raw_content,
             source_type="web",
             metadata={
                 "confidence_score": relevance_result.get('confidence', 0.8),
@@ -228,12 +235,19 @@ def _research_and_save_url_impl(url: str, query_context: str = "") -> str:
         title = next((line.strip() for line in lines[:5] if len(line.strip()) > 10), url.split('/')[-1])
         title = title[:100]  # Limit title length
         
+        # Create snippet from first few lines of content
+        snippet = clean_content.strip()[:300] + "..." if len(clean_content.strip()) > 300 else clean_content.strip()
+        
+        # Limit raw content size to prevent Firestore document size limits (1MB)
+        max_raw_content_size = 500000  # ~500KB to stay well under the limit
+        limited_raw_content = raw_content[:max_raw_content_size] if len(raw_content) > max_raw_content_size else raw_content
+        
         research_doc = ResearchDoc(
             title=title,
             url=url,
             content=clean_content,
-            snippet=clean_content.strip()[:300] + "..." if len(clean_content.strip()) > 300 else clean_content.strip(),
-            raw_content=raw_content[:500000] if len(raw_content) > 500000 else raw_content,
+            snippet=snippet,
+            raw_content=limited_raw_content,
             source_type="web",
             metadata={
                 "confidence_score": relevance_result.get('confidence', 0.8),
@@ -303,114 +317,93 @@ def research_search_results(search_query: str, max_urls: int = 3) -> str:
             search_prompt = f"Search the web for: {search_query}"
             
             # Handle async execution properly from sync context
-            try:
-                loop = asyncio.get_running_loop()
-                # We're in an event loop, use asyncio.create_task() or run_coroutine_threadsafe()
-                import concurrent.futures
-                import threading
-                
-                def run_in_thread():
-                    new_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(new_loop)
-                    try:
-                        return new_loop.run_until_complete(Runner.run(search_agent, search_prompt))
-                    finally:
-                        new_loop.close()
-                
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(run_in_thread)
-                    result = future.result(timeout=60)  # 60 second timeout
-                    
-            except RuntimeError:
-                # No event loop running, we can use asyncio.run()
-                result = asyncio.run(Runner.run(search_agent, search_prompt))
+            import concurrent.futures
             
-            current_logger.info(f"🔍 Agent search completed for: {search_query}")
-            current_logger.info(f"📝 Agent result: {result.final_output if hasattr(result, 'final_output') else result}")
+            def run_in_thread():
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    return new_loop.run_until_complete(Runner.run(search_agent, search_prompt))
+                finally:
+                    new_loop.close()
             
-            # Parse the agent result to extract structured data
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(run_in_thread)
+                result = future.result(timeout=60)
+                
+            # Parse structured results
+            import json
+            
+            structured_results = []
+            
+            # Try to parse JSON from the result
             try:
-                import json
-                import re
-                
-                # Get the raw result text
-                result_text = result.final_output if hasattr(result, 'final_output') else str(result)
-                
-                # Try to extract JSON from the result
-                json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
+                # Extract JSON from the result if it's wrapped in text
+                result_text = result.text
+                json_match = re.search(r'({[\s\S]*})', result_text)
                 if json_match:
-                    json_str = json_match.group()
-                    parsed_result = json.loads(json_str)
-                    search_results = parsed_result.get('results', [])
-                    current_logger.info(f"✅ Successfully parsed {len(search_results)} structured results")
+                    json_str = json_match.group(1)
+                    data = json.loads(json_str)
+                    if "results" in data and isinstance(data["results"], list):
+                        structured_results = data["results"]
+                        current_logger.info(f"✅ Successfully parsed {len(structured_results)} structured results")
                 else:
-                    # Fallback: try to extract URLs from text using regex
-                    current_logger.warning("No JSON found, attempting to extract URLs from text")
-                    urls = re.findall(r'https?://[^\s\)]+', result_text)
-                    search_results = []
-                    for url in urls:
-                        search_results.append({
-                            'url': url,
-                            'title': f"Search result from {search_query}",
-                            'snippet': result_text[:200] + "..." if len(result_text) > 200 else result_text
-                        })
-                    current_logger.info(f"🔄 Extracted {len(search_results)} URLs from text result")
-                    
-            except Exception as parse_error:
-                current_logger.error(f"❌ Error parsing agent result: {parse_error}")
-                search_results = []
-        
-        except Exception as agent_error:
-            current_logger.error(f"❌ Error using agent search: {agent_error}", exc_info=True)
-            search_results = []
-        
-        if not search_results or len(search_results) == 0:
-            current_logger.warning(f"No search results for query: {search_query}")
-            return f"No search results found for: {search_query}"
-        
-        current_logger.info(f"🔍 Found {len(search_results)} search results for: {search_query}")
-        
-        # Process each promising search result
-        processed_count = 0
-        saved_sources = []
-        
-        for i, result in enumerate(search_results[:max_urls], 1):
-            url = result.get('url', '')
-            title = result.get('title', 'Unknown Title')
-            
-            if not url:
-                current_logger.warning(f"Skipping result {i}: missing URL")
-                continue
-            
-            current_logger.info(f"Processing search result {i}: {title}")
-            
-            try:
-                # Call the actual implementation instead of the decorated function
-                result_summary = _research_and_save_url_impl(url, query_context=f"Search query: {search_query}")
+                    # Try direct parsing
+                    data = json.loads(result_text)
+                    if "results" in data and isinstance(data["results"], list):
+                        structured_results = data["results"]
+                        current_logger.info(f"✅ Successfully parsed {len(structured_results)} structured results")
+            except (json.JSONDecodeError, AttributeError) as e:
+                current_logger.warning(f"⚠️ Failed to parse JSON from result: {e}")
+                # Fallback to regex extraction for URLs
+                urls = re.findall(r'https?://[^\s"\'<>]+', result.text)
+                structured_results = [{"url": url, "title": url, "snippet": ""} for url in urls[:max_urls]]
+                if structured_results:
+                    current_logger.info(f"✅ Extracted {len(structured_results)} URLs using regex fallback")
                 
-                if result_summary and "successfully saved" in result_summary:
-                    saved_sources.append({
-                        'url': url,
-                        'title': title,
-                        'snippet': result.get('snippet', '')
-                    })
-                    processed_count += 1
-                    current_logger.info(f"✅ Successfully processed and saved: {title}")
-                else:
-                    current_logger.warning(f"⚠️ Failed to save or process: {title}")
-                    
-            except Exception as e:
-                current_logger.error(f"❌ Error processing {url}: {e}")
-                continue
+        except Exception as e:
+            current_logger.error(f"❌ Error executing search agent: {e}", exc_info=True)
+            return f"Error performing search: {str(e)}"
         
-        summary = f"🔍 Search '{search_query}': Processed {len(search_results[:max_urls])} URLs, saved {processed_count} sources\n" + "\n".join([f"• {source['title']}: Saved" for source in saved_sources])
-        current_logger.info(summary)
-        return summary
+        if not structured_results:
+            current_logger.warning(f"⚠️ No results found for query: {search_query}")
+            return f"No results found for: {search_query}"
+        
+        # Limit to max_urls
+        structured_results = structured_results[:max_urls]
+        
+        # Research each URL and save incrementally
+        processed_count = 0
+        saved_count = 0
+        
+        for i, result in enumerate(structured_results):
+            current_logger.info(f"Processing search result {i+1}: {result.get('title', 'Untitled')}")
+            
+            url = result.get("url", "")
+            if not url or not url.startswith("http"):
+                current_logger.warning(f"⚠️ Skipping invalid URL: {url}")
+                continue
+                
+            # Use the snippet as additional context if available
+            snippet = result.get("snippet", "")
+            enhanced_context = f"{search_query} {snippet}" if snippet else search_query
+            
+            # Research and save this URL
+            save_result = _research_and_save_url_impl(url, query_context=enhanced_context)
+            processed_count += 1
+            
+            if "Successfully researched and saved" in save_result:
+                saved_count += 1
+            else:
+                current_logger.warning(f"⚠️ Failed to save or process: {result.get('title', 'Untitled')}")
+        
+        current_logger.info(f"🔍 Search '{search_query}': Processed {processed_count} URLs, saved {saved_count} sources")
+        
+        return f"Completed search for '{search_query}'. Processed {processed_count} URLs, saved {saved_count} sources."
         
     except Exception as e:
-        current_logger.error(f"❌ Error in research_search_results for '{search_query}': {e}", exc_info=True)
-        return f"Error searching '{search_query}': {str(e)}"
-
+        current_logger.error(f"❌ Error in research_search_results: {e}", exc_info=True)
+        return f"Error researching search results: {str(e)}"
 
 # Function to generate a summary of all raw content
 def generate_content_summary(uid: str, session_id: int) -> str:
