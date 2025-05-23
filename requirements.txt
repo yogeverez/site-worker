@@ -1,6 +1,6 @@
 # Web Server
 flask==2.3.3
-gunicorn==20.1.0
+gunicorn==21.2.0
 
 # Flask Dependencies (explicitly listed for Cloud Run compatibility)
 werkzeug==2.3.8
@@ -14,7 +14,7 @@ blinker==1.6.2
 openai>=1.81.0
 openai-agents==0.0.16
 
-# Pydantic and Dependencies
+# Pydantic and Dependencies (Enhanced for research validation)
 pydantic>=2.10.0
 pydantic-core>=2.33.0
 annotated-types>=0.6.0
@@ -25,7 +25,26 @@ typing-inspection>=0.4.0
 # Google Cloud
 google-cloud-firestore==2.11.0
 firebase-admin==6.5.0
+google-api-core>=2.11.0
 
-# Web Tools
+# Web Tools (Enhanced for research)
 requests==2.31.0
 beautifulsoup4==4.12.2
+urllib3>=2.0.7
+lxml>=4.9.3
+
+# Date/Time utilities for enhanced tracking
+python-dateutil>=2.8.2
+
+# JSON handling and utilities
+jsonschema>=4.17.0
+
+# Enhanced logging and monitoring
+structlog>=23.1.0
+
+# Security and utilities
+cryptography>=41.0.0
+python-dotenv>=1.0.0
+
+# Performance optimization
+cachetools>=5.3.0

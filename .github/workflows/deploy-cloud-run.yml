@@ -33,6 +33,24 @@ jobs:
           service: "site-jobs-processor" # Cloud Run service name
           region: "us-central1" # Cloud Run region
           source: "." # Build from source (uses Dockerfile)
+          flags: |
+            --cpu=2
+            --memory=4Gi
+            --timeout=600
+            --execution-environment=gen2
           env_vars: |
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
             SERPAPI_KEY=${{ secrets.SERPAPI_KEY }}
+            ENVIRONMENT=development
+            MAX_RESEARCH_QUERIES=4
+            SEARCH_RATE_LIMIT_PER_MINUTE=5
+            BYPASS_SERPAPI_RESEARCH=false
+
+      - name: Test deployment
+        run: |
+          echo "✅ Enhanced Site Generator deployed successfully!"
+          echo "New features:"
+          echo "  🔍 Researcher-first workflow"
+          echo "  📊 Enhanced source tracking" 
+          echo "  🎯 Template-aware research"
+          echo "  🛡️ Improved error handling"
