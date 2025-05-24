@@ -1,6 +1,6 @@
 # app/agents/hero_agent.py
 
-from agents import Agent, ModelSettings
+from agents import Agent, ModelSettings, AgentOutputSchema
 from app.schemas import HeroSection
 
 def hero_agent() -> Agent:
@@ -20,6 +20,6 @@ def hero_agent() -> Agent:
         name="HeroSectionAgent",
         instructions=instructions,
         model="gpt-4o-mini",
-        output_type=HeroSection,
+        output_type=AgentOutputSchema(HeroSection, strict_json_schema=False),
         model_settings=ModelSettings(temperature=0.7, max_tokens=300)
     )

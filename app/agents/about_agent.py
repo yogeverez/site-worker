@@ -1,6 +1,6 @@
 # app/agents/about_agent.py
 
-from agents import Agent, ModelSettings
+from agents import Agent, ModelSettings, AgentOutputSchema
 from app.schemas import AboutSection
 
 def about_agent() -> Agent:
@@ -18,6 +18,6 @@ def about_agent() -> Agent:
         name="AboutSectionAgent",
         instructions=instructions,
         model="gpt-4o-mini",
-        output_type=AboutSection,
+        output_type=AgentOutputSchema(AboutSection, strict_json_schema=False),
         model_settings=ModelSettings(temperature=0.7, max_tokens=500)
     )

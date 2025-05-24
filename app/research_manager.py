@@ -4,169 +4,202 @@ import asyncio
 import logging
 import time
 from typing import Any, Dict, List
+
+from agents import Runner
+from agents.exceptions import MaxTurnsExceeded
+
 from app.database import get_db
-from app.process_status_tracker import ProcessStatusTracker
-from app.agent_types import gen_trace_id, trace, Runner
-from app.agents import user_data_collector_agent, researcher_agent, translator_agent, content_validator_agent
+from app.process_status_tracker import ProcessStatusTracker, PhaseTimer
+from app.agent_types import trace, gen_trace_id
+
+from app.agents.user_data_collector_agent import user_data_collector_agent
+from app.agents.researcher_agent import researcher_agent
 from app.agents.content_generation_orchestrator_agent import content_generation_orchestrator_agent
+from app.agents.translator_agent import translator_agent
+from app.agents.content_validator_agent import content_validator_agent
+
+from app.content_generation_agent import get_research_facts, save_content_section
 from app.user_data_collector import fetch_and_extract_social_data, summarize_user_data
-from app.content_generation_agent import get_research_facts, save_content_section, save_content_section  # (imported for direct use if needed)
 
 logger = logging.getLogger(__name__)
 
+
 class ResearchManager:
     """
-    Manages the multi-phase site generation workflow (user data collection, research, content generation, etc.).
+    Orchestrates the multi-phase workflow for site generation:
+      1. User data collection
+      2. Research
+      3. Content generation
+      4. Translation (optional)
+      5. Validation
     """
+
     def __init__(self, uid: str, session_id: int):
         self.uid = uid
         self.session_id = session_id
         self.db = get_db()
-        self.status_tracker = ProcessStatusTracker(uid, session_id)
-    
+        self.status = ProcessStatusTracker(uid, session_id)
+        self.runner = Runner()
+
     async def run(self, user_input: Dict[str, Any], languages: List[str], mode: str = "full") -> Dict[str, Any]:
-        """
-        Execute the site generation workflow according to the specified mode.
-        Returns a summary of results.
-        """
         trace_id = gen_trace_id()
         with trace("SiteGenerationWorkflow", trace_id=trace_id):
-            logger.info(f"[UID:{self.uid}] Starting site generation (mode={mode}, languages={languages})")
-            self.status_tracker.update_phase("overall", "in_progress", metadata={"mode": mode})
+            logger.info(f"[UID:{self.uid}] ▶ Starting workflow (mode={mode}, langs={languages})")
+            self.status.update_phase("overall", "in_progress", metadata={"mode": mode})
+
             try:
                 if mode == "full":
-                    # FULL: run our content‐generation orchestrator (which handles data collection, research, then content)
-                    primary_lang = languages[0] if languages else "en"
-                    agent = content_generation_orchestrator_agent(self.uid, self.session_id, primary_lang)
-                    runner = Runner()  # using SDK Runner
-                    # Supply the user input as the initial user message (JSON format)
-                    prompt = f"USER_INPUT_DATA = {user_input}"
-                    result = await runner.run(agent, prompt, max_turns=40)
-                    # After orchestrator completes, gather results:
-                    # 1. User profile (if updated by user_data phase, otherwise use original input)
-                    profile_dict = {}
-                    if isinstance(user_input, dict):
-                        profile_dict = user_input.copy()
-                    # 2. Count research sources saved
-                    sources_col = self.db.collection("research").document(self.uid).collection("sources")
-                    sources_list = list(sources_col.stream())
-                    source_count = len(sources_list)
-                    # 3. Handle content for additional languages (translate from primary language content)
-                    sections_generated: Dict[str, List[str]] = {}
-                    # Primary language (first in list) content sections:
-                    primary_lang = languages[0] if languages else "en"
-                    content_col = self.db.collection("content").document(self.uid).collection(primary_lang)
-                    primary_sections = [doc.id for doc in content_col.stream()]
-                    sections_generated[primary_lang] = primary_sections
-                    # Translate each section to other requested languages
-                    for lang in languages[1:]:
-                        sections_generated[lang] = []
-                        for section in primary_sections:
-                            # Fetch English content and translate it
-                            eng_doc = content_col.document(section).get()
-                            if eng_doc.exists:
-                                eng_content = eng_doc.to_dict()
-                                text_to_translate = __import__('json').dumps(eng_content, ensure_ascii=False)
-                                # Use translator agent to translate JSON text
-                                agent_t = translator_agent()
-                                t_runner = Runner()
-                                t_prompt = f"Translate the following {section} section content to {lang}:\n{text_to_translate}"
-                                t_result = await t_runner.run(agent_t, t_prompt, max_turns=2)
-                                translated_text = t_result.final_output if hasattr(t_result, 'final_output') else None
-                                if translated_text:
-                                    # Save translated content
-                                    save_content_section(self.uid, section, translated_text, lang)
-                                    sections_generated[lang].append(section)
-                    # 4. Run content validation on all sections in primary language
-                    for section in sections_generated.get(primary_lang, []):
-                        sec_doc = content_col.document(section).get()
-                        if sec_doc.exists:
-                            sec_content = __import__('json').dumps(sec_doc.to_dict(), ensure_ascii=False)
-                            validator = content_validator_agent(section)
-                            v_runner = Runner()
-                            v_prompt = f"Validate and correct the {section} section:\n{sec_content}"
-                            v_result = await v_runner.run(validator, v_prompt, max_turns=2)
-                            if v_result and hasattr(v_result, 'final_output'):
-                                corrected = v_result.final_output
-                                # Save corrections if any
-                                save_content_section(self.uid, section, __import__('json').dumps(corrected, ensure_ascii=False), primary_lang)
-                    # Mark overall process complete
-                    self.status_tracker.complete_process()
-                    logger.info(f"[UID:{self.uid}] ✅ Full generation completed: {source_count} sources, sections: {sections_generated}")
+                    primary = languages[0] if languages else "en"
+
+                    profile = await self._phase_user_data(user_input)
+                    await self._phase_research(profile)
+                    facts_json = self._fetch_research_facts()
+                    sections = await self._phase_content_generation(profile, facts_json, primary)
+                    await self._phase_translation(sections, primary, languages[1:])
+                    await self._phase_validation(primary)
+
+                    self.status.complete_process()
+                    logger.info(f"[UID:{self.uid}] ✅ Full run complete – sections: {sections}")
                     return {
                         "status": "success",
-                        "user_profile": profile_dict,
-                        "research_summary": {"sources_count": source_count},
-                        "content_summary": {"sections_generated": sections_generated, "languages": languages},
-                        "trace_id": trace_id
+                        "user_profile": profile,
+                        "sections": sections,
+                        "trace_id": trace_id,
                     }
-                
+
                 elif mode == "research_only":
-                    # Only perform user data collection and research phases, no content generation
-                    self.status_tracker.update_phase("user_data_collection", "in_progress")
-                    # Merge user input with any fetched social data (simulate using the same functions as agent)
-                    social_results = []
-                    for key, value in user_input.items():
-                        if isinstance(value, str) and any(platform in value.lower() for platform in ["linkedin", "github", "twitter", "facebook", "instagram"]):
-                            platform = next((p for p in ["linkedin", "github", "twitter", "facebook", "instagram"] if p in value.lower()), "unknown")
-                            data = fetch_and_extract_social_data(value, platform)
-                            social_results.append(data)
-                    user_profile = summarize_user_data(user_input, social_results)
-                    self.status_tracker.update_phase("user_data_collection", "completed")
-                    # Research phase using researcher agent
-                    self.status_tracker.update_phase("research", "in_progress")
-                    agent = researcher_agent(self.uid, self.session_id)
-                    runner = Runner()
-                    # Compose a prompt for researcher agent (provide name and basic queries)
-                    name = user_profile.name if hasattr(user_profile, 'name') else str(user_profile)
-                    base_queries = [
-                        f"{name} {user_input.get('current_title', '')}",
-                        f"{name} {user_input.get('current_company', '')}",
-                        f"{name} professional background"
-                    ]
-                    prompt = "ResearchQueries:\n" + "\n".join(base_queries)
-                    result = await runner.run(agent, prompt, max_turns=20)
-                    # Count saved sources
-                    sources = list(self.db.collection("research").document(self.uid).collection("sources").stream())
-                    source_count = len(sources)
-                    self.status_tracker.update_phase("research", "completed", metadata={"sources_count": source_count})
-                    self.status_tracker.complete_process()
-                    logger.info(f"[UID:{self.uid}] ✅ Research-only completed: {source_count} sources saved.")
+                    profile = await self._phase_user_data(user_input, collect_social=True)
+                    count = await self._phase_research(profile)
+                    self.status.complete_process()
                     return {
                         "status": "success",
-                        "user_profile": user_profile.dict() if hasattr(user_profile, 'dict') else user_profile,
-                        "research_summary": {"sources_count": source_count},
-                        "trace_id": trace_id
+                        "user_profile": profile,
+                        "research_summary": {"sources_count": count},
+                        "trace_id": trace_id,
                     }
-                
+
                 elif mode == "content_only":
-                    # Only content generation phase, assuming user_input already contains a complete profile.
-                    self.status_tracker.update_phase("content_generation", "in_progress")
-                    # We will proceed without research; use provided input directly for content generation.
-                    sections_generated = {}
-                    primary_lang = languages[0] if languages else "en"
-                    # Invoke content generation orchestrator agent with an empty research context
-                    agent = content_generation_orchestrator_agent(self.uid, self.session_id, primary_lang)
-                    runner = Runner()
-                    prompt = f"USER_PROFILE = {user_input}\n(No prior research available; generate content from profile alone.)"
-                    await runner.run(agent, prompt, max_turns=15)
-                    # Collect sections generated for primary language
-                    content_col = self.db.collection("content").document(self.uid).collection(primary_lang)
-                    sections_generated[primary_lang] = [doc.id for doc in content_col.stream()]
-                    # (Optional) translator and validation can be applied similarly to the full mode if needed
-                    self.status_tracker.update_phase("content_generation", "completed", metadata={"sections_generated": sections_generated.get(primary_lang, [])})
-                    self.status_tracker.complete_process()
+                    primary = languages[0] if languages else "en"
+                    sections = await self._phase_content_generation(user_input, None, primary)
+                    self.status.complete_process()
                     return {
                         "status": "success",
                         "user_profile": user_input,
-                        "content_summary": {"sections_generated": sections_generated, "languages": languages},
-                        "trace_id": trace_id
+                        "content_summary": {"sections_generated": sections, "languages": languages},
+                        "trace_id": trace_id,
                     }
-                
+
                 else:
                     raise ValueError(f"Unsupported mode: {mode}")
-            
+
             except Exception as e:
-                logger.error(f"[UID:{self.uid}] ❌ Error in workflow: {e}", exc_info=True)
-                self.status_tracker.update_phase("overall", "failed", error=str(e))
+                logger.exception(f"[UID:{self.uid}] ❌ Error in workflow")
+                self.status.update_phase("overall", "failed", error=str(e))
                 return {"status": "error", "error": str(e), "trace_id": trace_id}
+
+    async def _phase_user_data(self, user_input: Dict[str, Any], collect_social: bool = False) -> Dict[str, Any]:
+        """Run the User Data Collector agent (or ad-hoc social merge)."""
+        with PhaseTimer(self.status, "user_data_collection"):
+            if collect_social:
+                # merge social links manually
+                social_results = []
+                for k, v in user_input.items():
+                    if isinstance(v, str) and any(p in v.lower() for p in ["linkedin", "github", "twitter", "facebook", "instagram"]):
+                        platform = next((p for p in ["linkedin","github","twitter","facebook","instagram"] if p in v.lower()), "unknown")
+                        social_results.append(fetch_and_extract_social_data(v, platform))
+                profile = summarize_user_data(user_input, social_results)
+                logger.info(f"[UID:{self.uid}] ✔ Merged social data into profile")
+                # Ensure the profile is serializable
+                if hasattr(profile, 'dict'):
+                    return profile.dict()
+                elif hasattr(profile, 'model_dump'):
+                    return profile.model_dump()
+                return profile
+
+            # use the Agent
+            agent = user_data_collector_agent()
+            prompt = f"USER_INPUT_DATA = {user_input}"
+            result = await self.runner.run(agent, prompt, max_turns=20)
+            profile = result.final_output if hasattr(result, "final_output") else result
+            logger.info(f"[UID:{self.uid}] ✔ Agent-produced profile")
+            # Ensure the profile is serializable
+            if hasattr(profile, 'dict'):
+                return profile.dict()
+            elif hasattr(profile, 'model_dump'):
+                return profile.model_dump()
+            return profile
+
+    async def _phase_research(self, profile: Dict[str, Any]) -> int:
+        """Run the Researcher agent to populate Firestore with sources."""
+        with PhaseTimer(self.status, "research"):
+            agent = researcher_agent(self.uid, self.session_id)
+            prompt = f"USER_PROFILE = {profile}"
+            try:
+                await self.runner.run(agent, prompt, max_turns=40)
+            except MaxTurnsExceeded:
+                logger.warning(f"[UID:{self.uid}] ⚠ Research turns exceeded; proceeding")
+            # count documents
+            sources = list(self.db.collection("research").document(self.uid).collection("sources").stream())
+            count = len(sources)
+            logger.info(f"[UID:{self.uid}] ✔ Research saved {count} sources")
+            return count
+
+    def _fetch_research_facts(self) -> str:
+        """Retrieve up to 5 snippets from research for seeding content."""
+        with PhaseTimer(self.status, "content_generation"):
+            facts = get_research_facts(self.uid, self.session_id)
+            logger.debug(f"[UID:{self.uid}] Research facts: {facts}")
+            return facts
+
+    async def _phase_content_generation(self, profile: Dict[str, Any], facts_json: str, lang: str) -> List[str]:
+        """Run ContentGenerationOrchestrator and return the list of generated section IDs."""
+        with PhaseTimer(self.status, "content_generation"):
+            agent = content_generation_orchestrator_agent(self.uid, self.session_id, lang)
+            prompt = f"USER_PROFILE = {profile}"
+            if facts_json:
+                prompt += f"\nRESEARCH_FACTS = {facts_json}"
+            await self.runner.run(agent, prompt, max_turns=60)
+            col = self.db.collection("content").document(self.uid).collection(lang)
+            sections = [doc.id for doc in col.stream()]
+            logger.info(f"[UID:{self.uid}] ✔ Generated sections: {sections}")
+            return sections
+
+    async def _phase_translation(self, sections: List[str], src_lang: str, tgt_langs: List[str]):
+        """Translate each section from src_lang into each language in tgt_langs."""
+        if not tgt_langs:
+            return
+        with PhaseTimer(self.status, "translation"):
+            for lang in tgt_langs:
+                logger.info(f"[UID:{self.uid}] ─ Translating to '{lang}'")
+                for sec in sections:
+                    doc = self.db.collection("content").document(self.uid).collection(src_lang).document(sec).get()
+                    if not doc.exists:
+                        continue
+                    text = str(doc.to_dict())
+                    agent = translator_agent()
+                    try:
+                        result = await self.runner.run(agent, f"Translate to {lang}:\n{text}", max_turns=10)
+                    except MaxTurnsExceeded:
+                        logger.warning(f"[UID:{self.uid}] ⚠ Translation turns exceeded for '{sec}'->{lang}")
+                        continue
+                    translated = result.final_output if hasattr(result, "final_output") else result
+                    save_content_section(self.uid, sec, translated, lang)
+                    logger.info(f"[UID:{self.uid}] ✔ Saved translation '{sec}'->{lang}")
+
+    async def _phase_validation(self, lang: str):
+        """Validate each generated section in the given language."""
+        with PhaseTimer(self.status, "content_generation"):
+            col = self.db.collection("content").document(self.uid).collection(lang)
+            for sec in [doc.id for doc in col.stream()]:
+                logger.info(f"[UID:{self.uid}] ─ Validating '{sec}'")
+                doc = col.document(sec).get()
+                content = str(doc.to_dict())
+                agent = content_validator_agent(sec)
+                try:
+                    result = await self.runner.run(agent, f"Validate:\n{content}", max_turns=10)
+                except MaxTurnsExceeded:
+                    logger.warning(f"[UID:{self.uid}] ⚠ Validation turns exceeded for '{sec}'")
+                    continue
+                corrected = result.final_output if hasattr(result, "final_output") else result
+                save_content_section(self.uid, sec, corrected, lang)
+                logger.info(f"[UID:{self.uid}] ✔ Validation saved for '{sec}'")

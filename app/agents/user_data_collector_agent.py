@@ -1,9 +1,9 @@
 # app/agents/user_data_collector_agent.py
 
 import logging
-from agents import Agent, ModelSettings, function_tool
+from agents import Agent, ModelSettings, function_tool, AgentOutputSchema
 from app.schemas import UserProfileData
-from app.user_data_collector import fetch_and_extract_social_data, summarize_user_data
+from app.user_data_collector import fetch_and_extract_social_data
 
 logger = logging.getLogger(__name__)
 
@@ -11,24 +11,31 @@ def user_data_collector_agent() -> Agent:
     """
     Agent that collects and enriches user data (e.g., fetching social profiles) and outputs a structured UserProfileData.
     """
-    instructions = """You are a User Data Collection Specialist. 
-Your task:
-1. Process the provided user input dictionary.
-2. Fetch content from any social media or professional profile URLs provided.
-3. Extract relevant information from these profiles.
-4. Summarize all information into a comprehensive user profile.
+    instructions = """You are a User Data Collection Specialist with a focus on EFFICIENCY. 
+Complete these steps in a SINGLE TURN if possible:
 
-Focus on professional details: current title, company, skills, education, notable achievements, projects, and social presence. 
-Use the tools to fetch and parse profiles, then combine the results with the original input. 
-Output a complete user profile in JSON format."""
+1. QUICKLY scan the provided user input dictionary for any profile URLs (LinkedIn, GitHub, etc.)
+2. For EACH URL found, use fetch_and_extract_social_data ONCE to retrieve profile data
+3. IMMEDIATELY combine all fetched data with the original input
+4. DIRECTLY output a complete UserProfileData object without intermediate steps
+
+KEY FIELDS to prioritize (only include if data is available):
+- name: Full name of the person
+- current_title: Current job position
+- current_company: Current employer
+- skills: List of professional skills (limit to top 5-7)
+- education: Brief education history
+- bio: 1-2 sentence professional summary
+
+AVOID unnecessary tool calls and reasoning steps. Output the final JSON directly.
+"""
     # Wrap the data fetching and summarization functions as tools
     fetch_tool = function_tool(fetch_and_extract_social_data)
-    summarize_tool = function_tool(summarize_user_data)
     return Agent(
         name="UserDataCollector",
-        instructions=instructions,
+        instructions=instructions + "\nUse the fetched profile data and internal knowledge to produce the final JSON profile.",
         model="gpt-4o-mini",
-        tools=[fetch_tool, summarize_tool],
-        output_type=UserProfileData,
+        tools=[fetch_tool],
+        output_type=AgentOutputSchema(UserProfileData, strict_json_schema=False),
         model_settings=ModelSettings(temperature=0.3)
     )

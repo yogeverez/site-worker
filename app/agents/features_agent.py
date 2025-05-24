@@ -1,6 +1,6 @@
 # app/agents/features_agent.py
 
-from agents import Agent, ModelSettings
+from agents import Agent, ModelSettings, AgentOutputSchema
 from app.schemas import FeaturesList
 
 def features_agent() -> Agent:
@@ -18,6 +18,6 @@ def features_agent() -> Agent:
         name="FeaturesAgent",
         instructions=instructions,
         model="gpt-4o-mini",
-        output_type=FeaturesList,
+        output_type=AgentOutputSchema(FeaturesList, strict_json_schema=False),
         model_settings=ModelSettings(temperature=0.7, max_tokens=400)
     )

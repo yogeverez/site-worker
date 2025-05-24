@@ -1,6 +1,6 @@
 # app/agents/content_validator_agent.py
 
-from agents import Agent, ModelSettings
+from agents import Agent, ModelSettings, AgentOutputSchema
 from app.schemas import HeroSection, AboutSection, FeaturesList
 
 def content_validator_agent(content_type: str) -> Agent:
@@ -27,6 +27,6 @@ Output the validated {content_type} section JSON. If it was valid, you may outpu
         name=f"{content_type.capitalize()}ValidationAgent",
         instructions=instructions,
         model="gpt-4o-mini",
-        output_type=output_model,
+        output_type=AgentOutputSchema(output_model, strict_json_schema=False),
         model_settings=ModelSettings(temperature=0.1, max_tokens=400)
     )
