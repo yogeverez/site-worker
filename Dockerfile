@@ -33,7 +33,7 @@ RUN mkdir -p /app/cache && \
     chmod 755 /app/cache
 
 # Copy application code
-COPY app/*.py ./
+COPY app/ /app/app/
 
 # Set environment variables for enhanced system
 ENV PYTHONUNBUFFERED=1
@@ -63,4 +63,4 @@ CMD gunicorn -b 0.0.0.0:${PORT} \
     --access-logfile=- \
     --enable-stdio-inheritance \
     --capture-output \
-    main:app
+    app.main:app

@@ -1,5 +1,5 @@
 # Web Server
-flask==2.3.3
+flask[async]==2.3.3
 gunicorn==21.2.0
 
 # Flask Dependencies (explicitly listed for Cloud Run compatibility)

@@ -5,7 +5,7 @@ import os
 import time
 import logging
 import asyncio
-import agent_research_tools
+from app import agent_research_tools
 import urllib.parse
 import threading
 import functools
@@ -22,9 +22,9 @@ import openai
 from openai import RateLimitError, APIStatusError
 import datetime
 
-from database import get_db
-from schemas import UserProfileData, ResearchDoc, HeroSection, AboutSection, FeaturesList, ResearchOutput
-from site_agents import (
+from app.database import get_db
+from app.schemas import UserProfileData, ResearchDoc, HeroSection, AboutSection, FeaturesList, ResearchOutput
+from app.site_agents import (
     get_researcher_agent, 
     get_profile_synthesis_agent,
     get_site_generator_agent,
@@ -34,11 +34,12 @@ from site_agents import (
     get_features_agent, 
     translate_text
 )
-from agent_tool_impl import (
+from app.agent_tools import (
     agent_fetch_url, agent_strip_html
 )
-from agents import Runner, RunConfig
-from search_utils import search_web
+from app.agent_types import Runner
+# RunConfig is not used in our implementation, so we'll remove it
+from app.agent_tools import web_search as search_web
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -66,9 +67,30 @@ def convert_firestore_timestamps(data: Any) -> Any:
         return [convert_firestore_timestamps(item) for item in data]
     return data
 
-def get_site_input(uid: str) -> dict | None:
+def get_site_input(uid: str) -> Optional[dict]:
     """Fetches the siteInputDocument for a given UID from Firestore."""
+    import os
     db = get_db()
+    
+    # Check if we're using the mock database
+    if os.environ.get("USE_MOCK_DB", "false").lower() == "true" or hasattr(db, "data"):
+        # Return a mock site input document for testing
+        logger.info(f"Using mock site input document for UID: {uid}")
+        return {
+            "name": "Nadav Avitan",
+            "title": "Civil Engineer",
+            "bio": "Experienced civil engineer specializing in construction management and structural design.",
+            "professionalBackground": "Over 10 years of experience in the construction industry with expertise in project management and structural analysis.",
+            "templateType": "professional",
+            "socialUrls": {
+                "linkedin": "https://linkedin.com/in/nadav-avitan",
+                "website": "https://nadav-construction.com"
+            },
+            "languages": ["en", "he"],
+            "primaryLanguage": "en"
+        }
+    
+    # Regular Firestore lookup
     doc_ref = db.collection("siteInputDocuments").document(uid)
     doc = doc_ref.get()
     if doc.exists:
@@ -219,302 +241,89 @@ async def run_agent_safely(agent: Any, prompt: str, parent_logger: Optional[logg
         current_logger.error(f"Unexpected error during run of agent '{agent_name}'. Error: {e_general}", exc_info=True)
         return None
 
-async def do_comprehensive_research(uid: str, timestamp: int | None = None, parent_logger: Optional[logging.Logger] = None):
+async def do_comprehensive_research(uid: str, timestamp: Optional[int] = None, parent_logger: Optional[logging.Logger] = None):
     """
-    Enhanced research function implementing research recommendations:
-    1. Researcher-first approach with comprehensive query generation
-    2. Enhanced source tracking and validation
-    3. Better error handling and fallback mechanisms
-    4. Structured output with manifest creation
+    Enhanced research function that uses the new orchestration pipeline.
+    This now includes user data collection as a pre-research phase.
     """
     current_logger = parent_logger or logger
-    research_start_time = time.time()
+    session_id = timestamp or int(time.time())
     
     try:
-        current_logger.info(f"Starting comprehensive research for user {uid}")
+        current_logger.info(f"Starting orchestrated research for UID: {uid}")
         
-        # Get OpenAI client
-        try:
-            oai_client = get_openai_client()
-        except ValueError as e:
-            current_logger.error(f"Failed to get OpenAI client for research: {e}")
-            return
-
+        # Fetch user input data
         site_input = get_site_input(uid)
         if not site_input:
-            current_logger.warning(f"No site input found for user {uid}. Skipping research.")
+            current_logger.error(f"No siteInputDocument found for UID: {uid}")
+            _create_empty_research_manifest(uid, timestamp, "No user input found", current_logger)
             return
-
-        # Enhanced query generation
-        company_details = site_input.get('company', {})
-        user_profile_for_query_gen = {
-            "name": site_input.get("name", ""),
-            "title": site_input.get("title") or site_input.get("job_title", ""),
-            "bio": site_input.get("bio", ""),
-            "professionalBackground": site_input.get("professionalBackground", ""),
-            "socialUrls": site_input.get("socialUrls", {}),
-            "company": company_details,
-            "templateType": site_input.get("templateType", "resume")
-        }
-
-        search_queries, direct_urls = await _generate_comprehensive_search_queries(
-            user_profile_for_query_gen, oai_client, max_queries=6, parent_logger=current_logger
+        
+        # Import orchestration pipeline
+        from research_orchestrator import create_orchestration_pipeline
+        
+        # Create and run the orchestration pipeline
+        pipeline = create_orchestration_pipeline(
+            uid=uid,
+            session_id=session_id,
+            languages=["en"],  # For research phase, we only need English
+            parent_logger=current_logger
         )
-
-        if not search_queries and not direct_urls:
-            current_logger.warning(f"No search queries or direct URLs generated for user {uid}. Skipping research.")
-            await _create_empty_research_manifest(uid, timestamp, "no_queries_generated", current_logger)
-            return
-
-        current_logger.info(f"Generated {len(search_queries)} queries and {len(direct_urls)} direct URLs for user {uid}")
-
-        # Research execution with enhanced error handling
-        research_docs = []  # Initialize outside try block to ensure it's accessible for saving
-        status = "unknown"
-        successful_queries = []
-        research_session_id = timestamp or int(time.time())  # Define session ID early
         
-        if not search_queries:
-            current_logger.warning(f"No search queries generated for user {uid}")
-            status = "no_queries_generated"
+        # Run the pipeline asynchronously
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If we're already in an async context, create a task
+            task = asyncio.create_task(pipeline.run(site_input))
+            results = await task
         else:
-            # Set research context for incremental saving tools
-            from agent_research_tools import set_research_context
-            set_research_context(uid, research_session_id, current_logger)
-            
-            profile_summary_text = (
-                f"Name: {site_input.get('name', 'N/A')}\n"
-                f"Title: {site_input.get('title', 'N/A')}\n"
-                f"Company: {company_details.get('name', 'N/A')}\n"
-                f"Template Type: {user_profile_for_query_gen.get('templateType', 'unknown')}"
-            )
-            template = user_profile_for_query_gen.get('templateType', 'resume')
-            
-            researcher_prompt = (
-                f"Comprehensive Research Task:\n"
-                f"Target Profile: {profile_summary_text}\n"
-                f"Template Context: {template}\n\n"
-                f"Search Queries:\n"
-                + "\n".join([f"- {query}" for query in search_queries])
-                + f"\n\nDirect URLs:\n"
-                + "\n".join([f"- {url}" for url in direct_urls])
-                + f"\n\nExecute comprehensive research using the incremental saving tools:\n"
-                f"1. Use research_search_results(query, max_urls=3) for each search query\n"
-                f"2. Use research_and_save_url(url) for any direct URLs\n"
-                f"3. These tools automatically save data to Firestore as you work\n"
-                f"4. Focus on gathering factual information about the person\n"
-                f"5. Maintain high quality standards for source selection\n"
-                f"6. Return a summary of what research was completed\n\n"
-                f"Your response should summarize the research performed and sources found."
-            )
-            
-            researcher_agent_instance = get_researcher_agent()
-            
-            current_logger.info(f"Running enhanced researcher agent for user {uid} with incremental saving")
-            agent_results = await run_agent_safely(
-                researcher_agent_instance, 
-                researcher_prompt, 
-                parent_logger=current_logger,
-                max_turns=20  # Higher limit for research tasks with web searches
-            )
-
-            if agent_results is None:
-                current_logger.error(f"Researcher agent failed for user {uid}")
-                status = "agent_execution_failed"
-            else:
-                # With incremental saving, the agent just returns a summary
-                # The actual data is already saved to Firestore by the tools
-                current_logger.info(f"Research agent completed. Summary: {str(agent_results)[:200]}...")
-                status = "completed_successfully"
-                successful_queries = search_queries  # Assume all were attempted
-                
-                # Get count of saved documents from Firestore
-                try:
-                    db = get_db()
-                    user_research_col_ref = db.collection("research").document(uid).collection("sources")
-                    # Filter by current session
-                    sources_query = user_research_col_ref.where("research_session_id", "==", research_session_id)
-                    saved_docs = list(sources_query.stream())
-                    research_docs_count = len(saved_docs)
-                    current_logger.info(f"Found {research_docs_count} research documents saved in current session")
-                except Exception as e:
-                    current_logger.error(f"Error counting saved research documents: {e}")
-                    research_docs_count = 0
-
-        # Enhanced data persistence with comprehensive manifest
-        db = get_db()
-        source_refs = []
+            # If not in async context, run with asyncio.run
+            results = asyncio.run(pipeline.run(site_input))
         
-        # Research documents are already saved incrementally by the agent tools
-        # Just get the final count for the manifest
-        research_docs_count = 0
-        if status == "completed_successfully":
-            try:
-                user_research_col_ref = db.collection("research").document(uid).collection("sources")
-                sources_query = user_research_col_ref.where("research_session_id", "==", research_session_id)
-                saved_docs = list(sources_query.stream())
-                research_docs_count = len(saved_docs)
-                current_logger.info(f"✅ Found {research_docs_count} research documents already saved by incremental tools")
-            except Exception as e:
-                current_logger.error(f"Error counting saved research documents: {e}")
-                research_docs_count = 0
+        # Create research manifest based on results
+        research_phase = results.get("phases", {}).get("research", {})
+        sources_count = research_phase.get("sources_count", 0)
+        
+        if sources_count > 0:
+            current_logger.info(f"✅ Research completed successfully with {sources_count} sources")
+            
+            # Create success manifest
+            manifest_ref = db.collection("research").document(uid).collection("manifests").document(str(session_id))
+            manifest_ref.set({
+                "uid": uid,
+                "status": "completed",
+                "timestamp": firestore.SERVER_TIMESTAMP,
+                "session_id": session_id,
+                "total_sources_found": sources_count,
+                "sources_saved_successfully": sources_count,
+                "research_duration_seconds": time.time() - session_id,
+                "orchestration_results": results,
+                "search_backend": "openai-agents",
+                "search_operational": True
+            })
         else:
-            current_logger.warning(f"⚠️ Research status is '{status}' - no documents to count.")
-        
-        # Create comprehensive research manifest
-        research_duration = time.time() - research_start_time
-        
-        manifest_data = {
-            "uid": uid,
-            "status": status,
-            "timestamp": firestore.SERVER_TIMESTAMP,
-            "original_user_timestamp": timestamp if timestamp else None,
-            "research_duration_seconds": round(research_duration, 2),
-            "template_type": user_profile_for_query_gen.get('templateType', 'unknown'),
+            current_logger.warning(f"Research completed but no sources found")
+            _create_empty_research_manifest(uid, timestamp, "No relevant sources found", current_logger)
             
-            # Query and URL tracking
-            "search_queries_generated": search_queries,
-            "direct_urls_identified": direct_urls,
-            "successful_queries": successful_queries,
-            "failed_queries": [],
-            
-            # Results tracking
-            "total_sources_found": research_docs_count,
-            "sources_saved_successfully": research_docs_count,
-            "saved_source_ids": [],
-            "saved_source_urls": [],
-            "source_types_found": [],
-            
-            # Quality metrics
-            "average_content_length": 0,
-            "unique_domains_found": 0,
-            
-            # Configuration info
-            "max_queries_configured": 6,
-            
-            # Add accumulated raw data summary
-            "content_summary": agent_research_tools.generate_content_summary(uid, research_session_id),
-            
-            # Add comprehensive user data summary
-            "user_data_summary": {
-                "session_id": research_session_id,
-                "timestamp": firestore.SERVER_TIMESTAMP,
-                "research_duration": research_duration,
-                "sources_count": research_docs_count,
-                "search_queries": search_queries,
-                "successful_queries": successful_queries
-            },
-            
-            # Add comprehensive user data summary
-            "user_data_summary": {
-                "session_id": research_session_id,
-                "timestamp": firestore.SERVER_TIMESTAMP,
-                "research_duration": research_duration,
-                "sources_count": research_docs_count,
-                "search_queries": search_queries,
-                "successful_queries": successful_queries
-            }
-        }
-
-        # Create a separate comprehensive summary document
-        summary_doc_ref = db.collection("research").document(uid).collection("summary").document("comprehensive_summary")
-        
-        # Get all sources for this research session to create a comprehensive summary
-        sources_ref = db.collection("research").document(uid).collection("sources")
-        query = sources_ref.where("research_session_id", "==", research_session_id)
-        sources = query.get()
-        
-        # Extract key information from all sources
-        source_summaries = []
-        all_snippets = []
-        all_urls = []
-        for source in sources:
-            data = source.to_dict()
-            source_summaries.append({
-                "title": data.get("title", ""),
-                "url": data.get("url", ""),
-                "snippet": data.get("snippet", ""),
-                "confidence_score": data.get("metadata", {}).get("confidence_score", 0)
-            })
-            all_snippets.append(data.get("snippet", ""))
-            all_urls.append(data.get("url", ""))
-        
-        # Create comprehensive summary document
-        summary_doc_ref.set({
-            "uid": uid,
-            "session_id": research_session_id,
-            "timestamp": firestore.SERVER_TIMESTAMP,
-            "sources_count": len(source_summaries),
-            "source_summaries": source_summaries,
-            "all_urls": all_urls,
-            "combined_snippets": "\n\n".join(all_snippets),
-            "research_duration": research_duration
-        }, merge=True)
-        
-        current_logger.info(f"Created comprehensive research summary for user {uid}")
-        
-
-        # Create a separate comprehensive summary document
-        summary_doc_ref = db.collection("research").document(uid).collection("summary").document("comprehensive_summary")
-        
-        # Get all sources for this research session to create a comprehensive summary
-        sources_ref = db.collection("research").document(uid).collection("sources")
-        query = sources_ref.where("research_session_id", "==", research_session_id)
-        sources = query.get()
-        
-        # Extract key information from all sources
-        source_summaries = []
-        all_snippets = []
-        all_urls = []
-        for source in sources:
-            data = source.to_dict()
-            source_summaries.append({
-                "title": data.get("title", ""),
-                "url": data.get("url", ""),
-                "snippet": data.get("snippet", ""),
-                "confidence_score": data.get("metadata", {}).get("confidence_score", 0)
-            })
-            all_snippets.append(data.get("snippet", ""))
-            all_urls.append(data.get("url", ""))
-        
-        # Create comprehensive summary document
-        summary_doc_ref.set({
-            "uid": uid,
-            "session_id": research_session_id,
-            "timestamp": firestore.SERVER_TIMESTAMP,
-            "sources_count": len(source_summaries),
-            "source_summaries": source_summaries,
-            "all_urls": all_urls,
-            "combined_snippets": "\n\n".join(all_snippets),
-            "research_duration": research_duration
-        }, merge=True)
-        
-        current_logger.info(f"Created comprehensive research summary for user {uid}")
-
-        manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
-        manifest_ref.set(manifest_data)
-        
-        current_logger.info(f"Research completed for user {uid}. Status: {status}, Duration: {research_duration:.2f}s, Sources: {research_docs_count}")
-        
-        # Always trigger site content generation after research
-        current_logger.info(f"Triggering site content generation for user {uid} after successful research")
-        # Use default language if not specified
-        languages = ["en"]
-        try:
-            # Run site generation asynchronously
-            asyncio.create_task(generate_enhanced_site_content(uid, languages, timestamp, current_logger))
-        except Exception as e:
-            current_logger.error(f"Failed to trigger site generation after research: {e}", exc_info=True)
-
     except Exception as e:
-        current_logger.error(f"Critical error in do_comprehensive_research for user {uid}: {e}", exc_info=True)
-        await _create_error_research_manifest(uid, timestamp, str(e), current_logger)
+        current_logger.error(f"Error in orchestrated research: {str(e)}", exc_info=True)
+        _create_error_research_manifest(uid, timestamp, str(e), current_logger)
 
-async def _create_empty_research_manifest(uid: str, timestamp: int | None, reason: str, logger: logging.Logger):
+# Create async wrapper for backward compatibility
+def do_comprehensive_research_sync(uid: str, timestamp: Optional[int] = None, parent_logger: Optional[logging.Logger] = None):
+    """Synchronous wrapper for the async research function."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(do_comprehensive_research(uid, timestamp, parent_logger))
+    finally:
+        loop.close()
+
+async def _create_empty_research_manifest(uid: str, timestamp: int, reason: str, logger: logging.Logger):
     """Create a manifest when research cannot proceed."""
     try:
         db = get_db()
-        manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
+        manifest_ref = db.collection("research").document(uid).collection("manifests").document(str(timestamp))
         
         manifest_data = {
             "uid": uid,
@@ -530,11 +339,11 @@ async def _create_empty_research_manifest(uid: str, timestamp: int | None, reaso
     except Exception as e:
         logger.error(f"Failed to create empty research manifest for user {uid}: {e}")
 
-async def _create_error_research_manifest(uid: str, timestamp: int | None, error_msg: str, logger: logging.Logger):
+async def _create_error_research_manifest(uid: str, timestamp: int, error_msg: str, logger: logging.Logger):
     """Create an error manifest when research fails."""
     try:
         db = get_db()
-        manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
+        manifest_ref = db.collection("research").document(uid).collection("manifests").document(str(timestamp))
         
         manifest_data = {
             "uid": uid,
@@ -550,7 +359,7 @@ async def _create_error_research_manifest(uid: str, timestamp: int | None, error
     except Exception as e:
         logger.error(f"Failed to create error research manifest for user {uid}: {e}")
 
-async def generate_enhanced_site_content(uid: str, languages: List[str], timestamp: int | None = None, parent_logger: Optional[logging.Logger] = None):
+async def generate_enhanced_site_content(uid: str, languages: List[str], timestamp: Optional[int] = None, parent_logger: Optional[logging.Logger] = None):
     """
     Enhanced content generation that utilizes research data effectively.
     Implements research recommendations for grounding content in factual data.

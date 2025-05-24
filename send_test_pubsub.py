@@ -2,6 +2,7 @@ import requests
 import json
 import base64
 import argparse
+import requests
 
 FIXED_UID = "NiLppqYKUfcKQCnTGNvU2KLCAt03"
 
@@ -46,7 +47,7 @@ def send_pubsub_message(mode: str, port: int):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Send a simulated Pub/Sub message to the local worker.")
     parser.add_argument("--mode", type=str, default="full", help="Mode for the message (e.g., 'full', 'regenerate_section').")
-    parser.add_argument("--port", type=int, default=8116, help="Port the local worker is running on.")
+    parser.add_argument("--port", type=int, default=8110, help="Port the local worker is running on.")
     
     args = parser.parse_args()
     

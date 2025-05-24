@@ -1,13 +1,22 @@
-print("---- ENHANCED PYTHON MAIN.PY STARTING ----", flush=True)
-import os, base64, json, time
+"""
+Enhanced Site Worker - Main Application Entry Point
+Implements research-first approach with modular agent architecture
+"""
+print("---- ENHANCED SITE WORKER STARTING ----", flush=True)
+import os
+import base64
+import json
+import time
 import logging
 import asyncio
 import sys
-from flask import Flask, request
+from flask import Flask, request, jsonify
 
 # Import enhanced modules implementing research recommendations
-from openai import OpenAI
-from tools import do_comprehensive_research, generate_enhanced_site_content
+from app.research_manager import ResearchManager
+from app.research_orchestrator_updated import create_orchestration_pipeline
+from app.process_status_tracker import create_status_tracker
+from app.database import get_db
 
 # Configure comprehensive logging
 logger = logging.getLogger(__name__)
@@ -42,339 +51,360 @@ class EnhancedPubSubHandler:
     async def validate_request_parameters(self, payload: dict, logger: logging.Logger) -> tuple[bool, str, dict]:
         """Enhanced parameter validation with detailed feedback."""
         uid = payload.get("uid")
-        mode = payload.get("mode")
-        languages = payload.get("languages", [])
+        mode = payload.get("mode", "full")
+        languages = payload.get("languages", ["en"])
         timestamp = payload.get("timestamp")
         
         # Enhanced validation logic
         validation_result = {
             "uid_valid": bool(uid and uid.strip()),
-            "mode_valid": mode in ["research", "generate", "full"],
-            "languages_valid": isinstance(languages, list),
-            "timestamp_valid": timestamp is None or isinstance(timestamp, (int, float))
+            "mode_valid": mode in ["full", "research_only", "content_only"],
+            "languages_valid": isinstance(languages, list) and all(isinstance(lang, str) for lang in languages),
+            "timestamp_valid": isinstance(timestamp, (int, float))
         }
         
+        # Detailed validation feedback
         if not validation_result["uid_valid"]:
-            return False, "Missing or invalid UID parameter", validation_result
+            return False, "Missing or invalid 'uid' parameter", validation_result
         
         if not validation_result["mode_valid"]:
-            return False, f"Invalid mode '{mode}'. Must be 'research', 'generate', or 'full'", validation_result
-            
+            return False, f"Invalid 'mode' parameter: {mode}. Must be one of: full, research_only, content_only", validation_result
+        
         if not validation_result["languages_valid"]:
-            return False, "Languages parameter must be a list", validation_result
-        
-        # Special validation for generate mode
-        if mode == "generate" and not languages:
-            return False, "Generate mode requires at least one language specified", validation_result
-        
-        logger.info(f"Request validation passed: {validation_result}")
-        return True, "Parameters valid", validation_result
+            return False, "Invalid 'languages' parameter. Must be a list of language codes", validation_result
+            
+        return True, "Validation successful", validation_result
 
-    async def execute_research_phase(self, uid: str, timestamp: int, logger: logging.Logger) -> dict:
-        """Execute the research phase with comprehensive tracking."""
-        research_start = time.time()
-        logger.info(f"=== RESEARCH PHASE STARTING for {uid} ===")
+    async def process_pubsub_message(self, envelope: dict) -> dict:
+        """Process Pub/Sub message with enhanced error handling and observability."""
+        start_time = time.time()
+        logger.info(f"Starting enhanced Pub/Sub message processing")
         
         try:
-            await do_comprehensive_research(uid, timestamp=timestamp, parent_logger=logger)
-            research_duration = time.time() - research_start
+            # Extract and decode message
+            if not envelope:
+                return {"status": "error", "message": "No Pub/Sub message received"}
+                
+            message = envelope.get('message', {})
+            if not message:
+                return {"status": "error", "message": "Empty Pub/Sub message"}
+                
+            if 'data' not in message:
+                return {"status": "error", "message": "No data field in Pub/Sub message"}
+                
+            # Decode base64 message data
+            try:
+                data_str = base64.b64decode(message['data']).decode('utf-8')
+                data = json.loads(data_str)
+                logger.info(f"Successfully decoded message: {json.dumps(data)[:200]}...")
+            except Exception as e:
+                logger.error(f"Failed to decode message: {str(e)}")
+                return {"status": "error", "message": f"Failed to decode message: {str(e)}"}
             
-            result = {
-                "phase": "research",
-                "status": "completed",
-                "duration_seconds": round(research_duration, 2),
-                "timestamp": timestamp
-            }
-            
-            logger.info(f"=== RESEARCH PHASE COMPLETED for {uid} in {research_duration:.2f}s ===")
-            return result
-            
-        except Exception as e:
-            research_duration = time.time() - research_start
-            logger.error(f"=== RESEARCH PHASE FAILED for {uid} after {research_duration:.2f}s: {e} ===", exc_info=True)
-            
-            return {
-                "phase": "research",
-                "status": "failed", 
-                "duration_seconds": round(research_duration, 2),
-                "error": str(e),
-                "timestamp": timestamp
-            }
-
-    async def execute_generation_phase(self, uid: str, languages: list, timestamp: int, logger: logging.Logger) -> dict:
-        """Execute the content generation phase with research integration."""
-        generation_start = time.time()
-        logger.info(f"=== CONTENT GENERATION PHASE STARTING for {uid} with languages: {languages} ===")
-        
-        try:
-            await generate_enhanced_site_content(uid, languages, timestamp=timestamp, parent_logger=logger)
-            generation_duration = time.time() - generation_start
-            
-            result = {
-                "phase": "generation",
-                "status": "completed",
-                "duration_seconds": round(generation_duration, 2),
-                "languages": languages,
-                "timestamp": timestamp
-            }
-            
-            logger.info(f"=== CONTENT GENERATION PHASE COMPLETED for {uid} in {generation_duration:.2f}s ===")
-            return result
-            
-        except Exception as e:
-            generation_duration = time.time() - generation_start
-            logger.error(f"=== CONTENT GENERATION PHASE FAILED for {uid} after {generation_duration:.2f}s: {e} ===", exc_info=True)
-            
-            return {
-                "phase": "generation",
-                "status": "failed",
-                "duration_seconds": round(generation_duration, 2),
-                "error": str(e),
-                "languages": languages,
-                "timestamp": timestamp
-            }
-
-    async def process_request(self, payload: dict) -> tuple[str, int]:
-        """
-        Enhanced request processing implementing researcher-first workflow.
-        Returns (response_message, status_code).
-        """
-        # Create request-specific logger
-        request_id = payload.get("uid", "unknown")
-        request_logger = logging.getLogger(f"{__name__}.request_{request_id}")
-        
-        total_start_time = time.time()
-        
-        try:
-            request_logger.info(f"🚀 Processing enhanced site generation request for {request_id}")
-            
-            # Enhanced parameter validation
-            is_valid, validation_message, validation_details = await self.validate_request_parameters(payload, request_logger)
+            # Validate parameters
+            is_valid, error_message, validation_details = await self.validate_request_parameters(data, logger)
             if not is_valid:
-                request_logger.warning(f"❌ Request validation failed: {validation_message}")
-                return f"Bad Request: {validation_message}", 400
+                logger.error(f"Parameter validation failed: {error_message}")
+                return {"status": "error", "message": error_message, "validation_details": validation_details}
             
-            # Extract validated parameters
-            uid = payload["uid"]
-            mode = payload["mode"]
-            languages = payload.get("languages", [])
-            timestamp = payload.get("timestamp")
+            # Extract parameters
+            uid = data.get("uid")
+            mode = data.get("mode", "full")
+            languages = data.get("languages", ["en"])
             
-            request_logger.info(f"✅ Request validated - UID: {uid}, Mode: {mode}, Languages: {languages}")
+            # Create orchestration pipeline
+            logger.info(f"Creating orchestration pipeline for UID: {uid}, Mode: {mode}, Languages: {languages}")
+            result = await create_orchestration_pipeline(uid, mode, languages)
             
-            # Execution tracking
-            execution_results = []
+            # Calculate processing time
+            processing_time = time.time() - start_time
+            logger.info(f"Completed Pub/Sub processing in {processing_time:.2f}s")
             
-            # RESEARCHER-FIRST APPROACH: Execute research phase first for modes that include it
-            if mode in ["research", "full"]:
-                research_result = await self.execute_research_phase(uid, timestamp, request_logger)
-                execution_results.append(research_result)
-                
-                # If research fails and mode is "full", we can still proceed with generation
-                # but log this as a degraded scenario
-                if research_result["status"] == "failed" and mode == "full":
-                    request_logger.warning(f"⚠️ Research phase failed but continuing with generation for {uid}")
+            return {
+                "status": "success",
+                "message": "Processing completed successfully",
+                "processing_time_seconds": processing_time,
+                "result": result
+            }
             
-            # Execute content generation phase
-            if mode in ["generate", "full"]:
-                # Ensure we have languages for generation
-                if not languages:
-                    request_logger.warning(f"⚠️ No languages specified for generation mode, defaulting to ['en']")
-                    languages = ["en"]
-                
-                generation_result = await self.execute_generation_phase(uid, languages, timestamp, request_logger)
-                execution_results.append(generation_result)
-            
-            # Calculate total processing time and analyze results
-            total_duration = time.time() - total_start_time
-            
-            # Determine overall success
-            failed_phases = [r for r in execution_results if r["status"] == "failed"]
-            successful_phases = [r for r in execution_results if r["status"] == "completed"]
-            
-            if failed_phases:
-                request_logger.error(f"❌ Job completed with {len(failed_phases)} failed phases in {total_duration:.2f}s")
-                # Return 200 but log the issues - Pub/Sub should not retry for application-level failures
-                return "", 200
-            else:
-                request_logger.info(f"✅ Job completed successfully - All {len(successful_phases)} phases completed in {total_duration:.2f}s")
-                return "", 204
-                
         except Exception as e:
-            total_duration = time.time() - total_start_time
-            request_logger.error(f"💥 Unhandled error in request processing after {total_duration:.2f}s: {e}", exc_info=True)
-            return "Internal Server Error", 500
+            logger.error(f"Error processing Pub/Sub message: {str(e)}", exc_info=True)
+            return {
+                "status": "error",
+                "message": f"Error processing message: {str(e)}",
+                "processing_time_seconds": time.time() - start_time
+            }
 
 # Initialize enhanced handler
 enhanced_handler = EnhancedPubSubHandler()
 
-@app.route("/", methods=["POST"])
-def pubsub_handler():
-    """Enhanced HTTP endpoint for Pub/Sub push messages implementing research workflow."""
+@app.route('/', methods=['POST'])
+async def main_pubsub_handler():
+    """Main HTTP endpoint for Pub/Sub push messages with orchestration pipeline."""
     try:
-        # Parse Pub/Sub envelope
-        envelope = request.get_json(silent=True)
-        if not envelope or "message" not in envelope:
-            logger.warning("Bad Request: no Pub/Sub message received")
-            return "Bad Request: no Pub/Sub message received", 400
+        envelope = request.get_json()
+        if not envelope:
+            return jsonify({"status": "error", "message": "No Pub/Sub message received"}), 400
+            
+        # Process message asynchronously
+        result = await enhanced_handler.process_pubsub_message(envelope)
         
-        msg = envelope["message"]
-        message_id = msg.get('messageId', 'unknown')
-        logger.info(f"📨 Received Pub/Sub message: {message_id}")
-
-        # Decode message payload
-        data = msg.get("data")
-        if data:
-            try:
-                payload = json.loads(base64.b64decode(data).decode("utf-8"))
-                logger.info(f"📋 Successfully decoded message payload for message {message_id}")
-            except Exception as e:
-                logger.error(f"Failed to decode message data for {message_id}: {e}")
-                return "Bad Request: invalid message data", 400
+        if result.get("status") == "error":
+            return jsonify(result), 400
         else:
-            logger.warning(f"No data in message payload for {message_id}")
-            payload = {}
-
-        # Process request using enhanced handler
-        response_message, status_code = asyncio.run(enhanced_handler.process_request(payload))
-        return response_message, status_code
-
+            return jsonify(result), 200
+            
     except Exception as e:
-        logger.error(f"Unhandled error in pubsub_handler: {e}", exc_info=True)
-        return "Internal Server Error", 500
+        logger.error(f"Error in Pub/Sub handler: {str(e)}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/health", methods=["GET"])
-def enhanced_health_check():
-    """Enhanced health check with comprehensive system status."""
+@app.route('/test', methods=['GET'])
+def test_research_ui():
+    """Simple UI for testing research functionality."""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Site Worker Research Test</title>
+        <style>
+            body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+            .form-group { margin-bottom: 15px; }
+            label { display: block; margin-bottom: 5px; font-weight: bold; }
+            input, select, textarea { width: 100%; padding: 8px; box-sizing: border-box; }
+            button { padding: 10px 15px; background: #4CAF50; color: white; border: none; cursor: pointer; }
+            .results { margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 5px; }
+            .error { color: red; }
+            .success { color: green; }
+        </style>
+    </head>
+    <body>
+        <h1>Site Worker Research Test</h1>
+        <form id="researchForm">
+            <div class="form-group">
+                <label for="uid">User ID:</label>
+                <input type="text" id="uid" name="uid" required>
+            </div>
+            <div class="form-group">
+                <label for="mode">Processing Mode:</label>
+                <select id="mode" name="mode">
+                    <option value="full">Full (Research + Content)</option>
+                    <option value="research_only">Research Only</option>
+                    <option value="content_only">Content Only</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="languages">Languages (comma-separated):</label>
+                <input type="text" id="languages" name="languages" value="en">
+            </div>
+            <button type="submit">Start Research</button>
+        </form>
+        <div class="results" id="results" style="display: none;"></div>
+        
+        <script>
+            document.getElementById('researchForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                const uid = document.getElementById('uid').value;
+                const mode = document.getElementById('mode').value;
+                const languages = document.getElementById('languages').value.split(',').map(l => l.trim());
+                
+                document.getElementById('results').innerHTML = '<p>Starting research process...</p>';
+                document.getElementById('results').style.display = 'block';
+                
+                try {
+                    const response = await fetch(`/trigger_research/${uid}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ mode, languages })
+                    });
+                    
+                    const data = await response.json();
+                    if (response.ok) {
+                        document.getElementById('results').innerHTML = `
+                            <p class="success">Research started successfully!</p>
+                            <pre>${JSON.stringify(data, null, 2)}</pre>
+                        `;
+                    } else {
+                        document.getElementById('results').innerHTML = `
+                            <p class="error">Error: ${data.message}</p>
+                            <pre>${JSON.stringify(data, null, 2)}</pre>
+                        `;
+                    }
+                } catch (error) {
+                    document.getElementById('results').innerHTML = `
+                        <p class="error">Error: ${error.message}</p>
+                    `;
+                }
+            });
+        </script>
+    </body>
+    </html>
+    """
+    return html
+
+@app.route('/trigger_research/<uid>', methods=['POST'])
+async def trigger_research(uid):
+    """API endpoint to trigger research for a specific user."""
     try:
-        # Check OpenAI API configuration
-        openai_configured = bool(os.getenv("OPENAI_API_KEY", ""))
+        # Get request data
+        data = request.get_json() or {}
+        mode = data.get('mode', 'full')
+        languages = data.get('languages', ['en'])
         
-        # Check search configuration
-        search_backend = "mock_implementation"
-        search_operational = True
+        # Validate parameters
+        if not uid or not uid.strip():
+            return jsonify({"status": "error", "message": "Invalid user ID"}), 400
+            
+        if mode not in ['full', 'research_only', 'content_only']:
+            return jsonify({"status": "error", "message": f"Invalid mode: {mode}"}), 400
+            
+        if not isinstance(languages, list) or not all(isinstance(lang, str) for lang in languages):
+            return jsonify({"status": "error", "message": "Languages must be a list of strings"}), 400
         
-        bypass_search = False  # No longer needed with mock implementation
+        # Create session ID
+        session_id = int(time.time())
         
-        # Check environment configuration
-        environment = os.getenv("ENVIRONMENT", "unknown")
+        # Initialize status tracker
+        status_tracker = create_status_tracker(uid, session_id)
         
-        # Test basic functionality
-        try:
-            from tools import get_db
-            db_connection = get_db() is not None
-        except Exception as e:
-            logger.warning(f"Database connection test failed: {e}")
-            db_connection = False
+        # Start research process asynchronously
+        logger.info(f"Triggering research for UID: {uid}, Mode: {mode}, Languages: {languages}")
         
-        # Comprehensive health status
+        # Run in background task
+        asyncio.create_task(create_orchestration_pipeline(uid, mode, languages))
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Research process started for user {uid}",
+            "uid": uid,
+            "session_id": session_id,
+            "mode": mode,
+            "languages": languages
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error triggering research: {str(e)}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+async def enhanced_health_check():
+    """Enhanced health check with comprehensive system status."""
+    start_time = time.time()
+    
+    try:
         health_status = {
             "status": "healthy",
-            "timestamp": int(time.time()),
-            "version": "enhanced_research_implementation",
-            "environment": environment,
-            "configuration": {
-                "openai_api_configured": openai_configured,
-                "search_backend": search_backend,
-                "search_operational": search_operational,
-                "database_connection": db_connection
-            },
-            "features": {
-                "researcher_first_workflow": True,
-                "enhanced_error_handling": True,
-                "comprehensive_logging": True,
-                "multilingual_support": True,
-                "source_tracking": True
-            },
-            "workflow_phases": ["research", "generation", "translation", "validation"]
+            "timestamp": time.time(),
+            "uptime": time.time() - app.start_time if hasattr(app, 'start_time') else None,
+            "environment": os.getenv("ENVIRONMENT", "production"),
+            "components": {}
         }
         
-        # Determine overall health
-        critical_issues = []
-        if not openai_configured:
-            critical_issues.append("OpenAI API key not configured")
-        if not db_connection:
-            critical_issues.append("Database connection failed")
-            
-        if critical_issues:
+        # Check database connection
+        try:
+            db = get_db()
+            # Try a simple operation
+            db.collection("health_check").document("status").set({"timestamp": time.time()})
+            health_status["components"]["database"] = {
+                "status": "connected",
+                "type": "firestore"
+            }
+        except Exception as e:
+            health_status["components"]["database"] = {
+                "status": "error",
+                "message": str(e),
+                "type": "firestore"
+            }
             health_status["status"] = "degraded"
-            health_status["issues"] = critical_issues
-            logger.warning(f"Health check: Service degraded - {critical_issues}")
-            return json.dumps(health_status), 503, {"Content-Type": "application/json"}
         
-        logger.info("Health check: Enhanced service is healthy")
-        return json.dumps(health_status), 200, {"Content-Type": "application/json"}
+        # Check OpenAI API
+        try:
+            import openai
+            client = openai.OpenAI()
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "system", "content": "Health check"}],
+                max_tokens=5
+            )
+            health_status["components"]["openai_api"] = {
+                "status": "connected",
+                "model": "gpt-3.5-turbo"
+            }
+        except Exception as e:
+            health_status["components"]["openai_api"] = {
+                "status": "error",
+                "message": str(e)
+            }
+            health_status["status"] = "degraded"
+        
+        # Add response time
+        health_status["response_time_ms"] = (time.time() - start_time) * 1000
+        
+        return jsonify(health_status), 200 if health_status["status"] == "healthy" else 503
         
     except Exception as e:
-        logger.error(f"Health check failed: {e}", exc_info=True)
-        error_status = {
-            "status": "unhealthy", 
-            "error": str(e),
-            "timestamp": int(time.time())
-        }
-        return json.dumps(error_status), 500, {"Content-Type": "application/json"}
+        logger.error(f"Health check failed: {str(e)}", exc_info=True)
+        return jsonify({
+            "status": "critical",
+            "message": str(e),
+            "timestamp": time.time(),
+            "response_time_ms": (time.time() - start_time) * 1000
+        }), 500
 
-@app.route("/research-status/<uid>", methods=["GET"])
-def research_status(uid: str):
+@app.route('/research_status/<uid>', methods=['GET'])
+async def research_status(uid: str):
     """New endpoint to check research status for a specific user."""
     try:
-        from tools import get_db
+        if not uid or not uid.strip():
+            return jsonify({"status": "error", "message": "Invalid user ID"}), 400
+            
+        # Get status from Firestore
         db = get_db()
+        status_doc = db.collection("siteGenerationStatus").document(uid).get()
         
-        # Get research manifest
-        manifest_ref = db.collection("research").document(uid).collection("summary").document("manifest")
-        manifest_doc = manifest_ref.get()
+        if not status_doc.exists:
+            return jsonify({
+                "status": "not_found",
+                "message": f"No research process found for user {uid}"
+            }), 404
+            
+        status_data = status_doc.to_dict()
         
-        if not manifest_doc.exists:
-            return json.dumps({"uid": uid, "status": "not_found"}), 404, {"Content-Type": "application/json"}
-        
-        manifest_data = manifest_doc.to_dict()
-        
-        # Get source count
-        sources_ref = db.collection("research").document(uid).collection("sources")
-        source_count = len(list(sources_ref.limit(1).stream()))
-        
-        status_response = {
-            "uid": uid,
-            "research_status": manifest_data.get("status", "unknown"),
-            "sources_found": manifest_data.get("total_sources_found", 0),
-            "sources_saved": manifest_data.get("sources_saved_successfully", 0),
-            "research_duration": manifest_data.get("research_duration_seconds", 0),
-            "timestamp": manifest_data.get("timestamp"),
-            "template_type": manifest_data.get("template_type"),
-            "query_count": len(manifest_data.get("search_queries_generated", []))
-        }
-        
-        return json.dumps(status_response), 200, {"Content-Type": "application/json"}
+        # Calculate elapsed time if process is still running
+        if status_data.get("status") != "completed" and status_data.get("start_time"):
+            status_data["elapsed_seconds"] = time.time() - status_data["start_time"]
+            
+        return jsonify({
+            "status": "success",
+            "research_status": status_data
+        }), 200
         
     except Exception as e:
-        logger.error(f"Error checking research status for {uid}: {e}")
-        return json.dumps({"error": str(e)}), 500, {"Content-Type": "application/json"}
+        logger.error(f"Error checking research status: {str(e)}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # Development and debugging endpoints
 if os.getenv("ENVIRONMENT") == "development":
-    @app.route("/debug/trigger-research/<uid>", methods=["POST"])
-    def debug_trigger_research(uid: str):
+    @app.route('/debug/trigger/<uid>', methods=['GET'])
+    async def debug_trigger_research(uid: str):
         """Development endpoint to manually trigger research for a user."""
         try:
-            timestamp = int(time.time())
-            payload = {
-                "uid": uid,
-                "mode": "research", 
-                "timestamp": timestamp
-            }
-            
-            response_message, status_code = asyncio.run(enhanced_handler.process_request(payload))
-            return f"Research triggered for {uid}", status_code
-            
+            # Default to English only in debug mode
+            result = await create_orchestration_pipeline(uid, "full", ["en"])
+            return jsonify({
+                "status": "success",
+                "message": f"Debug research triggered for user {uid}",
+                "result": result
+            }), 200
         except Exception as e:
-            logger.error(f"Debug research trigger failed for {uid}: {e}")
-            return f"Error: {str(e)}", 500
+            logger.error(f"Debug trigger error: {str(e)}", exc_info=True)
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+# Store application start time
+app.start_time = time.time()
 
 # Only needed if running the Flask dev server
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8080"))
+    port = int(os.getenv("PORT", "8117"))
     debug_mode = os.getenv("ENVIRONMENT") == "development"
-    
-    logger.info(f"🚀 Starting enhanced site generation service on port {port} (debug: {debug_mode})")
+    print(f"Starting server on port {port}, debug mode: {debug_mode}", flush=True)
     app.run(host="0.0.0.0", port=port, debug=debug_mode)
