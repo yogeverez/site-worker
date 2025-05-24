@@ -1,34 +1,25 @@
-"""
-Hero Section Agent - Creates compelling hero sections for personal websites
-"""
-from app.agent_types import Agent, ModelSettings
+# app/agents/hero_agent.py
+
+from agents import Agent, ModelSettings
 from app.schemas import HeroSection
 
 def hero_agent() -> Agent:
-    """Enhanced hero agent with research-grounded instructions."""
-    hero_instructions = (
-        "You are an expert copywriter specializing in personal website hero sections. "
-        "Your task is to create a compelling hero section JSON that captures the person's essence and current professional standing.\n\n"
-        
-        "INSTRUCTIONS:\n"
-        "- Create a bold, attention-grabbing headline featuring the person's name\n"
-        "- Write a one-sentence tagline that highlights their unique value proposition or current role\n"
-        "- Use research findings to ensure accuracy and incorporate notable achievements\n"
-        "- Keep the tone professional yet engaging\n"
-        "- Ensure the content reflects their current professional status accurately\n\n"
-        
-        "IMPORTANT:\n"
-        "- Only use information provided in the user profile or research findings\n"
-        "- Do not fabricate achievements or roles\n"
-        "- If research contradicts user input, prioritize user input\n"
-        "- Output ONLY valid JSON for the HeroSection model\n\n"
-        
-        "The hero section should make visitors immediately understand who this person is and why they should be interested."
+    """
+    Agent for generating the Hero section of the site (headline and tagline).
+    """
+    instructions = (
+        "You are an expert copywriter for personal website hero sections. "
+        "Write a JSON object for HeroSection with a bold headline (often the name) and a one-line subheadline (tagline) capturing the user's essence.\n"
+        "- Use information from the provided profile and research facts.\n"
+        "- The headline should be attention-grabbing and include the name.\n"
+        "- The subheadline should highlight a unique value proposition or role, in one concise sentence.\n"
+        "- Maintain a professional and engaging tone.\n"
+        "- Output only valid JSON for the HeroSection model."
     )
     return Agent(
-        name="EnhancedHeroSectionAgent",
-        instructions=hero_instructions,
+        name="HeroSectionAgent",
+        instructions=instructions,
         model="gpt-4o-mini",
         output_type=HeroSection,
-        model_settings=ModelSettings(temperature=0.7)
+        model_settings=ModelSettings(temperature=0.7, max_tokens=300)
     )

@@ -1,11 +1,10 @@
-# Use Python 3.11 slim-bullseye base image which has fewer vulnerabilities
+# Use Python 3.11 slim-bullseye (minimal surface area)
 FROM python:3.11-slim-bullseye
 
 # Set working directory
 WORKDIR /app
 
-# Install minimal system dependencies and clean up in the same layer to reduce image size
-# Added curl for health checks and enhanced research capabilities
+# Install minimal system deps & upgrade, then clean caches
 RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
@@ -17,37 +16,32 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Update pip and install security packages
+# Upgrade pip, setuptools & wheel without caching
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Copy requirements and install with all dependencies
+# Copy and install Python dependencies, then remove pip cache
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
-    # Remove pip cache and temporary files to reduce image size
     rm -rf /root/.cache/pip/* && \
-    # Set proper permissions for application files
     find /usr/local -type d -exec chmod 755 {} \;
 
-# Create cache directories for the enhanced search system
-RUN mkdir -p /app/cache && \
-    chmod 755 /app/cache
+# Create application cache directory
+RUN mkdir -p /app/cache && chmod 755 /app/cache
 
 # Copy application code
-COPY app/ /app/app/
+COPY . .
 
-# Set environment variables for enhanced system
-ENV PYTHONUNBUFFERED=1
-ENV PORT=8080
-ENV PYTHONPATH=/app
-ENV ENVIRONMENT=production
+# Environment
+ENV PYTHONUNBUFFERED=1 \
+    PORT=8080 \
+    PYTHONPATH=/app \
+    ENVIRONMENT=production
 
-# Health check for enhanced monitoring
+# Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
-# Enhanced gunicorn configuration for research workloads
-# Increased timeout to 300 seconds for research-intensive operations
-# Adjusted worker settings for better research performance
+# Gunicorn configuration tuned for research workloads
 CMD gunicorn -b 0.0.0.0:${PORT} \
     --workers=2 \
     --threads=4 \

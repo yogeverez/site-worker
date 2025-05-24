@@ -1,6 +1,7 @@
 # Web Server
 flask[async]==2.3.3
 gunicorn==21.2.0
+uvicorn>=0.23.1
 
 # Flask Dependencies (explicitly listed for Cloud Run compatibility)
 werkzeug==2.3.8

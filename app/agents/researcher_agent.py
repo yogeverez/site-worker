@@ -1,92 +1,46 @@
-"""
-Enhanced Autonomous Researcher Agent - Conducts comprehensive web research about individuals
-"""
+# app/agents/researcher_agent.py
+
+import logging
 from typing import List
-from app.agent_types import Agent, ModelSettings, AgentOutputSchema
-from app.agent_tools import WebSearchTool
-from app.agent_tools import agent_fetch_url, agent_strip_html
-from app.agent_tools import research_and_save_url, research_search_results
-from ..schemas import ResearchDoc
+from agents import Agent, ModelSettings, function_tool
+from app.agent_tools import web_search_tool, agent_fetch_url, agent_strip_html, research_and_save_url, research_search_results
+from app.schemas import ResearchDoc
 
-def researcher_agent() -> Agent:
+logger = logging.getLogger(__name__)
+
+def researcher_agent(user_id: str, session_id: int) -> Agent:
     """
-    Enhanced autonomous researcher agent implementing research recommendations.
-    Features comprehensive search strategy, better source validation, and structured output.
+    Autonomous Researcher agent that uses web tools to gather factual info about a person.
+    Saves relevant findings to Firestore.
     """
-    researcher_instructions = """You are an advanced autonomous web research specialist conducting comprehensive research about individuals for personal website generation.
-
-ROLE & GOAL:
-You are tasked with gathering factual, verifiable information about a person from public sources. Your research will ground the content generation in real data, following retrieval-augmented generation principles to minimize hallucinations and maximize accuracy.
-
-AVAILABLE TOOLS:
-• WebSearchTool: Search the web and return results with title, URL, and snippet
-• agent_fetch_url(url): Retrieve full HTML content from a specific URL  
-• agent_strip_html(html): Convert HTML to clean, readable text
-• research_and_save_url(url): Save the content of a URL to a file
-• research_search_results(query): Save the search results of a query to a file
-
-RESEARCH STRATEGY:
-You will receive a profile summary and a list of targeted search queries. Execute your research systematically but efficiently:
-
-1. QUERY EXECUTION:
-   - For each search query, use research_search_results(query, max_urls=3) to search and save sources automatically
-   - For direct URLs (social profiles), use research_and_save_url(url, query_context="Direct profile") 
-   - These tools will automatically fetch content, process it, and save to Firestore
-   - Continue until all queries are processed or sufficient data is gathered
-
-2. TOOL USAGE:
-   - research_search_results(): Searches web and saves promising sources (max 3 per query)
-   - research_and_save_url(): Directly processes and saves a specific URL
-   - WebSearchTool(): Only use if you need to see search results before deciding which to process
-   - agent_fetch_url() + agent_strip_html(): Only use for manual content analysis
-
-3. SOURCE EVALUATION:
-   - Prioritize: official profiles, LinkedIn, company pages, authoritative sources
-   - SKIP: generic search results, news mentions without detail, social media posts
-   - The incremental tools will automatically filter and save only valuable content
-
-CRITICAL REQUIREMENTS:
-• FACTUAL ACCURACY: Only include information explicitly stated in sources
-• NO FABRICATION: Do not invent, infer, or extrapolate beyond source content
-• COMPREHENSIVE COVERAGE: Process all provided queries unless they yield no results
-• STRUCTURED OUTPUT: Save data to files using research_and_save_url and research_search_results
-
-OUTPUT FORMAT:
-Your final response should be a summary report of the research completed, including:
-- Number of search queries processed
-- Number of sources saved
-- Key types of information found
-- Any issues encountered
-
-Example: "Completed research for John Smith. Processed 3 search queries, saved 5 sources including LinkedIn profile and company bio. Found professional background in software engineering and recent project work."
-
-QUALITY STANDARDS:
-- Each file should contain relevant information about the person
-- Ensure URLs are accessible and relevant
-- If a source mentions the person but contains no useful professional information, exclude it
-- If ALL queries yield no relevant results, return an empty list: []
-
-ERROR HANDLING:
-- If web_search fails for a query, log the issue and continue with remaining queries
-- If agent_fetch_url fails for a URL, try using the search snippet instead
-- Never let individual failures stop the entire research process
-
-Remember: Your research provides the factual foundation for content generation. Accuracy and comprehensiveness are paramount. Every fact you include should be traceable to a specific source."""
-
+    instructions = """You are an expert web research agent tasked with gathering factual, verifiable information about a person for a personal website.
+Follow a research-first strategy:
+- Use the web search tool to find relevant pages (professional profiles, news, company pages, etc.).
+- For each search query provided, use the tools to fetch and save relevant sources:
+    • research_search_results(query) – find top results and save their content
+    • research_and_save_url(url) – directly fetch and save a specific URL's content
+    • agent_fetch_url, agent_strip_html – fetch and parse content if needed manually
+Save all useful information to the database (it will be used later for content generation).
+**Important**: 
+- Only save content relevant to the target person and their professional life.
+- Do NOT fabricate content. Only use information from actual sources.
+- If no info is found for a query, continue to the next query.
+When finished, output a summary: e.g., "Processed X search queries, saved Y sources." or [] if nothing found.
+"""
+    # Bind user_id and session_id into tool calls via closures
+    @function_tool
+    def save_url(url: str) -> dict:
+        """Fetch and save the content of the given URL (tool for researcher)."""
+        return research_and_save_url(url, user_id, session_id)
+    @function_tool
+    def search_and_save(query: str) -> dict:
+        """Search for the query and save top results (tool for researcher)."""
+        return research_search_results(query, user_id, session_id)
     return Agent(
-        name="EnhancedAutonomousResearcher",
+        name="AutonomousResearcher",
+        instructions=instructions,
         model="gpt-4o-mini",
-        instructions=researcher_instructions,
-        tools=[
-            WebSearchTool(),
-            agent_fetch_url, 
-            agent_strip_html,
-            research_and_save_url,
-            research_search_results
-        ],
-        output_type=AgentOutputSchema(List[ResearchDoc], strict_json_schema=False),
-        model_settings=ModelSettings(
-            temperature=0.3,  # Lower temperature for more consistent, factual output
-            max_tokens=4000   # Allow for comprehensive research output
-        )
+        tools=[web_search_tool, agent_fetch_url, agent_strip_html, search_and_save, save_url],
+        output_type=List[ResearchDoc],
+        model_settings=ModelSettings(temperature=0.2, max_tokens=1200)
     )

@@ -1,42 +1,32 @@
-"""
-Content Validation Agent - Ensures generated content meets quality standards
-"""
-from app.agent_types import Agent, ModelSettings
+# app/agents/content_validator_agent.py
+
+from agents import Agent, ModelSettings
 from app.schemas import HeroSection, AboutSection, FeaturesList
 
 def content_validator_agent(content_type: str) -> Agent:
     """
-    Creates validation agents for different content types.
-    These agents ensure generated content meets quality standards.
+    Factory for an agent that validates and corrects a given content section.
+    content_type should be one of: "hero", "about", "features".
     """
-    validation_instructions = f"""You are a content validation specialist for {content_type} sections.
+    instructions = f"""You are a validator for the {content_type} section content.
+Check the given {content_type} section content for:
+- Factual accuracy (ensure claims are supported by provided info)
+- Professional tone and appropriate style
+- Correct JSON structure for the {content_type.capitalize()}Section model
+- Completeness of required fields.
 
-VALIDATION CRITERIA:
-• Ensure content is factual and grounded in provided information
-• Check that tone and style are appropriate for professional websites
-• Verify that required fields are present and properly formatted
-• Flag any potential inaccuracies or unsupported claims
+If issues are found:
+- Correct minor errors directly (e.g., fix JSON formatting, adjust tone or remove unsupported claims).
+- If content is fundamentally flawed or unsupported by facts, recommend regeneration.
 
-CORRECTION GUIDELINES:
-• Fix formatting issues and ensure JSON validity
-• Remove or flag unverifiable statements
-• Ensure content length is appropriate for the section type
-• Maintain professional tone throughout
-
-If content passes validation, return it unchanged.
-If corrections are needed, return the corrected version.
-If content is fundamentally flawed, suggest regeneration."""
-
-    output_type_map = {
-        "hero": HeroSection,
-        "about": AboutSection, 
-        "features": FeaturesList
-    }
-
+Output the validated {content_type} section JSON. If it was valid, you may output it unchanged.
+"""
+    # Choose the Pydantic model corresponding to the content_type
+    output_model = {"hero": HeroSection, "about": AboutSection, "features": FeaturesList}.get(content_type, dict)
     return Agent(
-        name=f"{content_type.title()}ValidationAgent",
+        name=f"{content_type.capitalize()}ValidationAgent",
+        instructions=instructions,
         model="gpt-4o-mini",
-        instructions=validation_instructions,
-        output_type=output_type_map.get(content_type, dict),
-        model_settings=ModelSettings(temperature=0.1)
+        output_type=output_model,
+        model_settings=ModelSettings(temperature=0.1, max_tokens=400)
     )

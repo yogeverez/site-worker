@@ -1,8 +1,11 @@
+# app/database.py
+
 """
 Database utilities for Firestore connection
 """
 import logging
 import os
+import uuid
 from google.cloud import firestore
 from collections import defaultdict
 
@@ -27,17 +30,26 @@ class MockCollection:
     def document(self, doc_id=None):
         # Generate a random doc_id if none is provided
         if doc_id is None:
-            import uuid
             doc_id = str(uuid.uuid4())
         return MockDocument(self.db, self.collection_name, doc_id)
+    
+    def add(self, data):
+        """
+        Simulate Firestore .add(): create a new document with random ID and return (ref, write_result).
+        """
+        doc_id = str(uuid.uuid4())
+        self.db.data[self.collection_name][doc_id] = data
+        # Return a tuple (DocumentReference, MockWriteResult)
+        return (MockDocument(self.db, self.collection_name, doc_id), None)
     
     def where(self, field, op, value):
         # Simple implementation that doesn't actually filter
         return self
     
     def stream(self):
-        # Return empty list for now
-        return []
+        # Return an iterator of MockDocumentSnapshot for all docs in this collection
+        for doc_id, doc_data in self.db.data[self.collection_name].items():
+            yield MockDocumentSnapshot(doc_data)
 
 class MockDocument:
     def __init__(self, db, collection_name, doc_id):
@@ -60,15 +72,16 @@ class MockDocument:
         return True
     
     def get(self):
-        return MockDocumentSnapshot(self.db.data[self.collection_name].get(self.doc_id, {}))
+        data = self.db.data[self.collection_name].get(self.doc_id, {})
+        return MockDocumentSnapshot(data)
 
 class MockDocumentSnapshot:
     def __init__(self, data):
-        self.data = data
+        self._data = data
         self.exists = bool(data)
     
     def to_dict(self):
-        return self.data
+        return self._data
 
 # Global mock instance
 _mock_db = None
@@ -77,7 +90,6 @@ def get_db():
     """Initialize and return Firestore client or mock for local development."""
     global _mock_db
     
-    # Check if we're in local development mode
     use_mock = os.environ.get("USE_MOCK_DB", "false").lower() == "true"
     
     try:

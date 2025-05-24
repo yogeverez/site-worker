@@ -26,7 +26,7 @@ def send_pubsub_message(mode: str, port: int):
         "subscription": "projects/your-project/subscriptions/your-subscription" # Example subscription
     }
     
-    url = f"http://localhost:{port}/"
+    url = f"http://localhost:{port}/pubsub"
     headers = {'Content-Type': 'application/json'}
     
     print(f"Sending POST request to {url} with payload:")

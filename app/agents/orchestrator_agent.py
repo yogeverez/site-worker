@@ -3,10 +3,14 @@ Site Generation Orchestrator Agent - Coordinates the entire site generation proc
 """
 from app.agent_types import Agent, ModelSettings
 
-def orchestrator_agent() -> Agent:
+def orchestrator_agent(uid: str, languages: list = None) -> Agent:
     """
     Master orchestrator agent that coordinates the entire site generation process.
     Implements the researcher-first approach recommended in the research.
+    
+    Args:
+        uid: User ID for whom the site is being generated
+        languages: List of language codes to generate content for
     """
     orchestrator_instructions = """You are the Site Generation Orchestrator responsible for coordinating a multi-agent workflow to create comprehensive personal websites.
 

@@ -7,7 +7,7 @@ import time
 from typing import Dict, List, Any, Optional
 from app.agent_types import Agent, function_tool, ModelSettings
 from app.schemas import UserProfileData
-from app.agent_tools import agent_fetch_url, agent_strip_html, agent_extract_structured_data
+from app.agent_tools import agent_fetch_url, agent_strip_html
 from app.database import get_db
 import hashlib
 import json
@@ -40,11 +40,35 @@ def fetch_and_extract_social_data(url: str, platform: str = "unknown") -> Dict[s
                 "error": html_content
             }
         
-        # Extract structured data
-        structured_data = agent_extract_structured_data(html_content, url)
-        
         # Extract clean text content
         clean_text = agent_strip_html(html_content, max_output_size=5000)
+        
+        # Create basic structured data
+        structured_data = {
+            "url": url,
+            "platform": "unknown",
+            "content_type": "webpage",
+            "title": "Unknown"
+        }
+        
+        # Try to extract title from HTML
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_content, "lxml")
+            title_tag = soup.find("title")
+            if title_tag:
+                structured_data["title"] = title_tag.get_text(strip=True)
+                
+            # Determine platform type based on URL
+            if "linkedin.com" in url.lower():
+                structured_data["platform"] = "linkedin"
+            elif "github.com" in url.lower():
+                structured_data["platform"] = "github"
+            elif "twitter.com" in url.lower() or "x.com" in url.lower():
+                structured_data["platform"] = "twitter"
+        except Exception as e:
+            logger.warning(f"Error extracting title from HTML: {e}")
+            # Continue with default values
         
         # Platform-specific extraction patterns
         extracted_data = {

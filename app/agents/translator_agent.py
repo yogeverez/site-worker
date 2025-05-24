@@ -1,57 +1,36 @@
-"""
-Translator Agent - Localizes content to different languages
-"""
-import logging
-from app.agent_types import Agent, ModelSettings
+# app/agents/translator_agent.py
 
-logger = logging.getLogger(__name__)
+from typing import Dict, Any
+from agents import Agent, Runner, ModelSettings
 
 def translator_agent() -> Agent:
     """
-    Translation agent for localizing content to different languages.
+    Agent for translating content to other languages.
     """
-    instructions = """You are a professional translator specializing in website content localization.
-    
-    Your responsibilities:
-    - Translate content accurately while preserving meaning and tone
-    - Adapt content for cultural nuances when appropriate
-    - Maintain professional terminology consistency
-    - Ensure translations flow naturally in the target language
-    
-    Always provide high-quality translations that read naturally to native speakers."""
-
+    instructions = """You are a professional translator for website content.
+Translate any provided text into the target language accurately, preserving tone and meaning.
+Adapt for cultural nuances as needed, and ensure the result reads naturally for a native speaker.
+Output only the translated text."""
     return Agent(
         name="TranslatorAgent",
         instructions=instructions,
         model="gpt-4o-mini",
-        model_settings=ModelSettings(
-            temperature=0.2,
-            max_tokens=3000
-        )
+        model_settings=ModelSettings(temperature=0.2, max_tokens=1000)
     )
 
-def translate_text(text: str, target_language: str) -> str:
+async def translate_text(text: str, target_language: str) -> str:
     """
-    Translate text to the specified target language using the translator agent.
+    Helper function to translate text to the target language using the translator agent.
     
     Args:
-        text: Text to translate
-        target_language: Target language (e.g., 'Spanish', 'French', 'German')
+        text: The text to translate
+        target_language: The target language code (e.g., 'es', 'fr', 'he')
         
     Returns:
-        Translated text
+        The translated text
     """
-    try:
-        agent = translator_agent()
-        prompt = f"Translate the following text to {target_language}:\n\n{text}"
-        
-        runner = Runner()
-        result = runner.run(agent, prompt, max_turns=1)
-        
-        if result and hasattr(result, 'final_output'):
-            return result.final_output
-        return text  # Return original if translation fails
-        
-    except Exception as e:
-        logger.error(f"Translation failed: {e}")
-        return text  # Return original text if translation fails
+    agent = translator_agent()
+    runner = Runner()
+    prompt = f"Translate the following text to {target_language}:\n\n{text}"
+    result = await runner.run(agent, prompt)
+    return result.final_output
