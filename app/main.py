@@ -59,6 +59,7 @@ def trigger_research(uid):
     )
 
 
+@app.route('/', methods=['POST'])
 @app.route('/pubsub', methods=['POST'])
 async def pubsub_handler():
     envelope = request.get_json()
